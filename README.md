@@ -105,3 +105,6 @@ pc = new RTCPeerConnection({
 ## Security
 - Only exchange SDP with trusted devices.
 - This demo does not include authentication — for production, add pairing tokens or passcodes and encryption.
+
+## License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
