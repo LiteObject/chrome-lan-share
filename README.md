@@ -1,7 +1,7 @@
 # Chrome LAN Share
 
 Peer-to-peer message & file sharing Chrome extension for LAN use.  
-Implements WebRTC DataChannel with **manual or automated signaling** (copy/paste SDP or local WebSocket server). No server required for manual mode.
+Implements WebRTC (Web Real-Time Communication) DataChannel with **manual or automated signaling** (copy/paste SDP or local WebSocket server). No server required for manual mode.
 
 ## How to install (developer mode)
 1. Save the project folder (contains `manifest.json`, `popup.html`, `popup.js`, `styles.css`).
@@ -11,7 +11,7 @@ Implements WebRTC DataChannel with **manual or automated signaling** (copy/paste
 ## Quick usage
 
 ### Manual Signaling (Default)
-- On Device A: Click **Create Offer**. Wait for ICE gathering to complete (status shows "ICE: complete"). The Local SDP textarea will populate with the offer. Click **Copy Local SDP** (or manually copy the text), then paste it into Device B's Remote SDP textarea.
+- On Device A: Click **Create Offer**. Wait for ICE (Interactive Connectivity Establishment) gathering to complete (status shows "ICE: complete"). The Local SDP (Session Description Protocol) textarea will populate with the offer. Click **Copy Local SDP** (or manually copy the text), then paste it into Device B's Remote SDP textarea.
 - On Device B: Paste the offer into Remote SDP, then click **Set Remote / Create Answer**. The Local SDP textarea will populate with the answer. Copy it and paste back into Device A's Remote SDP.
 - On Device A: Paste the answer into Remote SDP, then click **Set Remote**.
 - Wait until DataChannel opens (status updates), then send messages & files.
