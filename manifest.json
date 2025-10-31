@@ -10,9 +10,9 @@
     "default_title": "chrome-lan-share"
   },
   "icons": {
-    "16": "icon.svg",
-    "48": "icon.svg",
-    "128": "icon.svg"
+    "16": "icon-data-sharing-16.png",
+    "48": "icon-data-sharing-48.png",
+    "128": "icon-data-sharing-128.png"
   },
   "permissions": [
     "storage"
