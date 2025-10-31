@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <title>chrome-lan-share</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+    <h1>chrome-lan-share</h1>
+
+    <section id="signaling">
+        <label><input type="checkbox" id="useServer"> Use Signaling Server (run server.js locally)</label>
+        <button id="connectServer" disabled>Connect to Server</button>
+    </section>
+
+    <section id="connection">
+        <div class="col">
+            <button id="createOffer">Create Offer</button>
+            <button id="createAnswer" disabled>Set Remote / Create Answer</button>
+            <button id="setRemote" disabled>Set Remote</button>
+        </div>
+
+        <label>Local SDP (share this)</label>
+        <textarea id="localSDP" readonly rows="6"></textarea>
+        <div class="row">
+            <button id="copyLocal">Copy Local SDP</button>
+            <span id="iceStatus">ICE: —</span>
+            <span id="connStatus">Conn: —</span>
+        </div>
+
+        <label>Remote SDP (paste peer's SDP here)</label>
+        <textarea id="remoteSDP" rows="6"></textarea>
+    </section>
+
+    <section id="chat">
+        <label>Messages</label>
+        <div id="messages" class="messages"></div>
+        <div class="sendrow">
+            <input id="msgInput" placeholder="Type a message..." />
+            <button id="sendMsg">Send</button>
+        </div>
+
+        <label>Send File</label>
+        <input id="fileInput" type="file" />
+        <div id="fileProgress" class="small"></div>
+    </section>
+
+    <script src="popup.js"></script>
+</body>
+
+</html>
