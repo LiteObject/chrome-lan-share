@@ -20,6 +20,7 @@ const fileProgress = document.getElementById('fileProgress');
 
 const useServerCheckbox = document.getElementById('useServer');
 const connectServerBtn = document.getElementById('connectServer');
+const serverIPInput = document.getElementById('serverIP');
 
 let pc = null;
 let dc = null;
@@ -58,9 +59,10 @@ useServerCheckbox.addEventListener('change', () => {
 
 connectServerBtn.addEventListener('click', () => {
     if (ws) ws.close();
-    ws = new WebSocket('ws://localhost:8080');
+    const serverAddr = 'ws://' + serverIPInput.value;
+    ws = new WebSocket(serverAddr);
     ws.onopen = () => {
-        logMessage('Connected to signaling server', 'peer');
+        logMessage('Connected to signaling server at ' + serverAddr, 'peer');
         connectServerBtn.textContent = 'Connected';
         createOfferBtn.disabled = false;
         createAnswerBtn.disabled = false;
@@ -87,7 +89,7 @@ connectServerBtn.addEventListener('click', () => {
         }
     };
     ws.onerror = (error) => {
-        logMessage('Failed to connect to signaling server', 'peer');
+        logMessage('Failed to connect to signaling server at ' + serverAddr, 'peer');
         console.error(error);
     };
 });

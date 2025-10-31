@@ -17,8 +17,9 @@ Implements WebRTC (Web Real-Time Communication) DataChannel with **manual or aut
 - Wait until DataChannel opens (status updates), then send messages & files.
 
 ### Automated Signaling (Optional)
-- Run `node server.js` on a machine accessible to both devices.
-- On both devices: Check "Use Signaling Server" and click "Connect to Server".
+- Install dependencies: Run `npm install` in the project directory.
+- Run the server: `npm start` or `node server.js` on a machine accessible to both devices (it binds to 0.0.0.0 for LAN access).
+- On both devices: Check "Use Signaling Server", enter the server address (e.g., `192.168.1.100:8080` for remote, or `localhost:8080` for local), and click "Connect to Server".
 - On Device A: Click **Create Offer**.
 - On Device B: Click **Wait for Offer**.
 - Connections establish automatically without manual copying.

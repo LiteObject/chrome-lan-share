@@ -4,11 +4,11 @@
 
 const WebSocket = require('ws');
 
-const wss = new WebSocket.Server({ port: 8080 });
+const wss = new WebSocket.Server({ host: '0.0.0.0', port: 8080 });
 
 let clients = [];
 
-console.log('Signaling server running on ws://localhost:8080');
+console.log('Signaling server running on ws://0.0.0.0:8080 (accessible via your LAN IP, e.g., ws://192.168.1.100:8080)');
 
 wss.on('connection', (ws) => {
     console.log('New client connected');
