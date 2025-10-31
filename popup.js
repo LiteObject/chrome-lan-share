@@ -44,8 +44,9 @@ useServerCheckbox.addEventListener('change', () => {
         copyLocalBtn.style.display = 'none';
         setRemoteBtn.style.display = 'none';
         createAnswerBtn.textContent = 'Wait for Offer';
-        createOfferBtn.disabled = !!ws; // disable if not connected
-        createAnswerBtn.disabled = !!ws;
+        // disable offer/answer until we have a WS connection
+        createOfferBtn.disabled = !ws;
+        createAnswerBtn.disabled = !ws;
     } else {
         localSDPTextarea.style.display = 'block';
         remoteSDPTextarea.style.display = 'block';
@@ -59,13 +60,20 @@ useServerCheckbox.addEventListener('change', () => {
 
 connectServerBtn.addEventListener('click', () => {
     if (ws) ws.close();
-    const serverAddr = 'ws://' + serverIPInput.value;
+    const addr = serverIPInput.value.trim();
+    if (!addr || !addr.includes(':')) {
+        alert('Please enter a valid server address (e.g., localhost:8080 or 192.168.1.100:8080)');
+        return;
+    }
+    const serverAddr = 'ws://' + addr;
     ws = new WebSocket(serverAddr);
     ws.onopen = () => {
         logMessage('Connected to signaling server at ' + serverAddr, 'peer');
         connectServerBtn.textContent = 'Connected';
-        createOfferBtn.disabled = false;
-        createAnswerBtn.disabled = false;
+        if (useServer) {
+            createOfferBtn.disabled = false;
+            createAnswerBtn.disabled = false;
+        }
     };
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
@@ -356,33 +364,64 @@ fileInput.addEventListener('change', async (e) => {
     }
 
     const id = Date.now().toString(36);
-    // send file metadata as JSON string
     const meta = { type: 'file-meta', id, name: file.name, size: file.size };
     dc.send(JSON.stringify(meta));
-
-    // read and send in chunks
-    const stream = file.stream();
-    const reader = stream.getReader();
-    let sent = 0;
     fileProgress.textContent = `Sending "${file.name}" (0 / ${file.size})`;
-    while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        // value is Uint8Array
-        // ensure chunk size — but the browser will usually chunk naturally; still send slices if large
-        let offset = 0;
-        while (offset < value.byteLength) {
-            const slice = value.slice(offset, offset + CHUNK_SIZE);
-            dc.send(slice.buffer);
-            sent += slice.byteLength;
-            offset += slice.byteLength;
-            fileProgress.textContent = `Sending "${file.name}" (${sent} / ${file.size})`;
-            // optionally await a tiny pause to avoid saturating
-            await new Promise(r => setTimeout(r, 0));
+
+    // prefer stream(), fallback to FileReader
+    if (file.stream) {
+        const stream = file.stream();
+        const reader = stream.getReader();
+        let sent = 0;
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            let offset = 0;
+            while (offset < value.byteLength) {
+                const slice = value.slice(offset, offset + CHUNK_SIZE);
+                dc.send(slice.buffer);
+                sent += slice.byteLength;
+                offset += slice.byteLength;
+                fileProgress.textContent = `Sending "${file.name}" (${sent} / ${file.size})`;
+                await new Promise(r => setTimeout(r, 0));
+            }
         }
+    } else {
+        // FileReader fallback
+        let offset = 0;
+        const reader = new FileReader();
+        reader.addEventListener('load', async (evt) => {
+            const buffer = evt.target.result;
+            let off = 0;
+            while (off < buffer.byteLength) {
+                const end = Math.min(off + CHUNK_SIZE, buffer.byteLength);
+                const chunk = buffer.slice(off, end);
+                dc.send(chunk);
+                off = end;
+                fileProgress.textContent = `Sending "${file.name}" (${Math.min(off + offset, file.size)} / ${file.size})`;
+                await new Promise(r => setTimeout(r, 0));
+            }
+            // continue until all read
+            if (offset < file.size) {
+                readSlice(offset);
+            } else {
+                fileProgress.textContent = `Sent "${file.name}" (${file.size} bytes)`;
+                logMessage(`Sent file: ${file.name} (${Math.round(file.size / 1024)} KB)`, 'me');
+                fileInput.value = '';
+            }
+        });
+
+        function readSlice(o) {
+            offset = o;
+            const slice = file.slice(offset, offset + CHUNK_SIZE);
+            reader.readAsArrayBuffer(slice);
+        }
+        readSlice(0);
     }
-    fileProgress.textContent = `Sent "${file.name}" (${file.size} bytes)`;
-    logMessage(`Sent file: ${file.name} (${Math.round(file.size / 1024)} KB)`, 'me');
-    // reset file input
-    fileInput.value = '';
+
+    if (file.stream) {
+        fileProgress.textContent = `Sent "${file.name}" (${file.size} bytes)`;
+        logMessage(`Sent file: ${file.name} (${Math.round(file.size / 1024)} KB)`, 'me');
+        fileInput.value = '';
+    }
 });
