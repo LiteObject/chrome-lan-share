@@ -17,10 +17,17 @@ const sendMsgBtn = document.getElementById('sendMsg');
 
 const fileInput = document.getElementById('fileInput');
 const fileProgress = document.getElementById('fileProgress');
+const fileProgressText = document.getElementById('fileProgressText');
 
 const useServerCheckbox = document.getElementById('useServer');
 const connectServerBtn = document.getElementById('connectServer');
 const serverIPInput = document.getElementById('serverIP');
+const darkModeToggle = document.getElementById('darkModeToggle');
+
+const setupTab = document.getElementById('setupTab');
+const chatTab = document.getElementById('chatTab');
+const setupContent = document.getElementById('setupContent');
+const chatContent = document.getElementById('chatContent');
 
 let pc = null;
 let dc = null;
@@ -28,7 +35,24 @@ let isOfferer = false;
 let ws = null;
 let useServer = false;
 
-const CHUNK_SIZE = 64 * 1024; // 64KB
+darkModeToggle.addEventListener('click', () => {
+    document.body.classList.toggle('dark');
+    darkModeToggle.textContent = document.body.classList.contains('dark') ? '☀️ Light Mode' : '🌙 Dark Mode';
+});
+
+setupTab.addEventListener('click', () => {
+    setupTab.classList.add('active');
+    chatTab.classList.remove('active');
+    setupContent.classList.add('active');
+    chatContent.classList.remove('active');
+});
+
+chatTab.addEventListener('click', () => {
+    chatTab.classList.add('active');
+    setupTab.classList.remove('active');
+    chatContent.classList.add('active');
+    setupContent.classList.remove('active');
+});
 
 useServerCheckbox.addEventListener('change', () => {
     useServer = useServerCheckbox.checked;
@@ -105,7 +129,8 @@ connectServerBtn.addEventListener('click', () => {
 function logMessage(text, who = 'peer') {
     const el = document.createElement('div');
     el.className = `message ${who === 'me' ? 'me' : 'peer'}`;
-    el.textContent = text;
+    const timestamp = new Date().toLocaleTimeString();
+    el.textContent = `[${timestamp}] ${text}`;
     messagesDiv.appendChild(el);
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }
@@ -193,7 +218,9 @@ function setupDataChannel(channel) {
                         received: 0,
                         buffers: []
                     };
-                    fileProgress.textContent = `Receiving "${incomingFile.name}" (0 / ${incomingFile.size})`;
+                    fileProgressText.textContent = `Receiving "${incomingFile.name}" (0 / ${incomingFile.size})`;
+                    fileProgress.value = 0;
+                    fileProgress.max = 100;
                     return;
                 }
             } catch (e) {
@@ -213,7 +240,9 @@ function setupDataChannel(channel) {
             }
             incomingFile.buffers.push(evt.data);
             incomingFile.received += evt.data.byteLength;
-            fileProgress.textContent = `Receiving "${incomingFile.name}" (${incomingFile.received} / ${incomingFile.size})`;
+            const percent = (incomingFile.received / incomingFile.size) * 100;
+            fileProgress.value = percent;
+            fileProgressText.textContent = `Receiving "${incomingFile.name}" (${incomingFile.received} / ${incomingFile.size})`;
 
             if (incomingFile.received >= incomingFile.size) {
                 // assemble
@@ -228,7 +257,8 @@ function setupDataChannel(channel) {
                 el.appendChild(link);
                 messagesDiv.appendChild(el);
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
-                fileProgress.textContent = `Received "${incomingFile.name}"`;
+                fileProgressText.textContent = `Received "${incomingFile.name}"`;
+                fileProgress.value = 100;
                 incomingFile = null;
             }
         }
@@ -366,7 +396,9 @@ fileInput.addEventListener('change', async (e) => {
     const id = Date.now().toString(36);
     const meta = { type: 'file-meta', id, name: file.name, size: file.size };
     dc.send(JSON.stringify(meta));
-    fileProgress.textContent = `Sending "${file.name}" (0 / ${file.size})`;
+    fileProgressText.textContent = `Sending "${file.name}" (0 / ${file.size})`;
+    fileProgress.value = 0;
+    fileProgress.max = 100;
 
     // prefer stream(), fallback to FileReader
     if (file.stream) {
@@ -382,7 +414,9 @@ fileInput.addEventListener('change', async (e) => {
                 dc.send(slice.buffer);
                 sent += slice.byteLength;
                 offset += slice.byteLength;
-                fileProgress.textContent = `Sending "${file.name}" (${sent} / ${file.size})`;
+                const percent = (sent / file.size) * 100;
+                fileProgress.value = percent;
+                fileProgressText.textContent = `Sending "${file.name}" (${sent} / ${file.size})`;
                 await new Promise(r => setTimeout(r, 0));
             }
         }
@@ -398,14 +432,17 @@ fileInput.addEventListener('change', async (e) => {
                 const chunk = buffer.slice(off, end);
                 dc.send(chunk);
                 off = end;
-                fileProgress.textContent = `Sending "${file.name}" (${Math.min(off + offset, file.size)} / ${file.size})`;
+                const percent = ((off + offset) / file.size) * 100;
+                fileProgress.value = percent;
+                fileProgressText.textContent = `Sending "${file.name}" (${Math.min(off + offset, file.size)} / ${file.size})`;
                 await new Promise(r => setTimeout(r, 0));
             }
             // continue until all read
             if (offset < file.size) {
                 readSlice(offset);
             } else {
-                fileProgress.textContent = `Sent "${file.name}" (${file.size} bytes)`;
+                fileProgressText.textContent = `Sent "${file.name}" (${file.size} bytes)`;
+                fileProgress.value = 100;
                 logMessage(`Sent file: ${file.name} (${Math.round(file.size / 1024)} KB)`, 'me');
                 fileInput.value = '';
             }
@@ -420,7 +457,8 @@ fileInput.addEventListener('change', async (e) => {
     }
 
     if (file.stream) {
-        fileProgress.textContent = `Sent "${file.name}" (${file.size} bytes)`;
+        fileProgressText.textContent = `Sent "${file.name}" (${file.size} bytes)`;
+        fileProgress.value = 100;
         logMessage(`Sent file: ${file.name} (${Math.round(file.size / 1024)} KB)`, 'me');
         fileInput.value = '';
     }

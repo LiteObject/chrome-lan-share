@@ -9,45 +9,63 @@
 </head>
 
 <body>
-    <h1>LAN Share</h1>
+    <div class="header">
+        <h1>LAN Share</h1>
+        <button id="darkModeToggle" title="Toggle dark mode">🌙</button>
+    </div>
 
-    <section id="signaling">
-        <label><input type="checkbox" id="useServer"> Use Signaling Server</label>
-        <input id="serverIP" placeholder="localhost:8080" value="localhost:8080" />
-        <button id="connectServer" disabled>Connect to Server</button>
-    </section>
+    <div class="tabs">
+        <button id="setupTab" class="tab active">Setup</button>
+        <button id="chatTab" class="tab">Chat</button>
+    </div>
 
-    <section id="connection">
-        <div class="col">
-            <button id="createOffer">Create Offer</button>
-            <button id="createAnswer" disabled>Set Remote / Create Answer</button>
-            <button id="setRemote" disabled>Set Remote</button>
-        </div>
+    <div id="setupContent" class="tab-content active">
+        <section id="signaling">
+            <label><input type="checkbox" id="useServer"> Use Signaling Server</label>
+            <div class="row">
+                <input id="serverIP" placeholder="localhost:8080" value="localhost:8080"
+                    title="Enter server address (host:port)" />
+                <button id="connectServer" disabled title="Connect to the WebSocket signaling server">Connect to
+                    Server</button>
+            </div>
+        </section>
 
-        <label>Local SDP (share this)</label>
-        <textarea id="localSDP" readonly rows="6"></textarea>
-        <div class="row">
-            <button id="copyLocal">Copy Local SDP</button>
-            <span id="iceStatus">ICE: —</span>
-            <span id="connStatus">Conn: —</span>
-        </div>
+        <section id="connection">
+            <div class="col">
+                <button id="createOffer" title="Generate SDP offer for connection">Create Offer</button>
+                <button id="createAnswer" disabled title="Process remote offer and create answer">Set Remote / Create
+                    Answer</button>
+                <button id="setRemote" disabled title="Apply remote SDP to complete connection">Set Remote</button>
+            </div>
 
-        <label>Remote SDP (paste peer's SDP here)</label>
-        <textarea id="remoteSDP" rows="6"></textarea>
-    </section>
+            <label>Local SDP (share this)</label>
+            <textarea id="localSDP" readonly rows="6"></textarea>
+            <div class="row">
+                <button id="copyLocal" title="Copy SDP to clipboard">Copy Local SDP</button>
+                <span id="iceStatus">ICE: —</span>
+                <span id="connStatus">Conn: —</span>
+            </div>
 
-    <section id="chat">
-        <label>Messages</label>
-        <div id="messages" class="messages"></div>
-        <div class="sendrow">
-            <input id="msgInput" placeholder="Type a message..." />
-            <button id="sendMsg">Send</button>
-        </div>
+            <label>Remote SDP (paste peer's SDP here)</label>
+            <textarea id="remoteSDP" rows="6"></textarea>
+        </section>
+    </div>
 
-        <label>Send File</label>
-        <input id="fileInput" type="file" />
-        <div id="fileProgress" class="small"></div>
-    </section>
+    <div id="chatContent" class="tab-content">
+        <section id="chat">
+            <label>Messages</label>
+            <div id="messages" class="messages"></div>
+            <div class="sendrow">
+                <input id="msgInput" placeholder="Type a message..." title="Enter message to send" />
+                <button id="sendMsg" title="Send message">Send</button>
+            </div>
+
+            <label>Send File</label>
+            <input id="fileInput" type="file" title="Select file to send" />
+            <progress id="fileProgress" max="100" value="0" title="File transfer progress"></progress>
+            <div id="fileProgressText" class="small"></div>
+        </section>
+    </div>
 
     <script src="popup.js"></script>
 </body>
