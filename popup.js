@@ -31,6 +31,7 @@ const setupContent = document.getElementById('setupContent');
 const chatContent = document.getElementById('chatContent');
 
 const CHUNK_SIZE = 16 * 1024; // send files in 16KB chunks to balance speed and reliability
+const BUFFERED_AMOUNT_LIMIT = 1024 * 1024; // pause if DataChannel buffers exceed 1MB
 
 let pc = null;
 let dc = null;
@@ -38,6 +39,90 @@ let isOfferer = false;
 let ws = null;
 let useServer = false;
 let waitingForServerOffer = false;
+
+function clearFileProgress(message = '') {
+    fileProgress.value = 0;
+    fileProgress.max = 100;
+    fileProgressText.textContent = message;
+}
+
+function ensureChannelOpen() {
+    if (!dc || dc.readyState !== 'open') {
+        throw new Error('DataChannel is not open');
+    }
+}
+
+async function sendChunk(chunk) {
+    ensureChannelOpen();
+    dc.send(chunk);
+    if (dc.bufferedAmount > BUFFERED_AMOUNT_LIMIT) {
+        while (dc.bufferedAmount > BUFFERED_AMOUNT_LIMIT) {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            ensureChannelOpen();
+        }
+    } else {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+}
+
+function updateSendProgress(file, sent) {
+    const percent = file.size ? (sent / file.size) * 100 : 0;
+    fileProgress.value = percent;
+    fileProgressText.textContent = `Sending "${file.name}" (${sent} / ${file.size})`;
+}
+
+function notifyPeerFileError(id, name, reason) {
+    if (!dc || dc.readyState !== 'open') return;
+    try {
+        dc.send(JSON.stringify({ type: 'file-error', id, name, reason }));
+    } catch (err) {
+        console.error('Failed to notify peer about file transfer error', err);
+    }
+}
+
+function handleFileSendFailure(id, name, reason) {
+    const friendlyReason = reason === 'DataChannel is not open' ? 'channel closed' : reason;
+    notifyPeerFileError(id, name, friendlyReason);
+    clearFileProgress(`Send failed for "${name}"${friendlyReason ? `: ${friendlyReason}` : ''}`);
+    logMessage(`File send failed: ${name}${friendlyReason ? ` (${friendlyReason})` : ''}`, 'peer');
+}
+
+async function sendFileFromStream(file) {
+    const reader = file.stream().getReader();
+    let sent = 0;
+    try {
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (!value) continue;
+            const chunkView = value instanceof Uint8Array ? value : new Uint8Array(value);
+            let offset = 0;
+            while (offset < chunkView.byteLength) {
+                const end = Math.min(offset + CHUNK_SIZE, chunkView.byteLength);
+                const slice = chunkView.subarray(offset, end);
+                await sendChunk(slice);
+                sent += slice.byteLength;
+                updateSendProgress(file, sent);
+            }
+        }
+    } finally {
+        reader.releaseLock?.();
+    }
+}
+
+async function sendFileFromArrayBuffer(file) {
+    const buffer = await file.arrayBuffer();
+    const view = new Uint8Array(buffer);
+    let sent = 0;
+    for (let offset = 0; offset < view.byteLength;) {
+        const end = Math.min(offset + CHUNK_SIZE, view.byteLength);
+        const slice = view.subarray(offset, end);
+        await sendChunk(slice);
+        sent += slice.byteLength;
+        updateSendProgress(file, sent);
+        offset = end;
+    }
+}
 
 function resetUI() {
     iceStatus.textContent = 'ICE: —';
@@ -48,8 +133,7 @@ function resetUI() {
     createAnswerBtn.disabled = useServer && !ws;
     localSDPTextarea.value = '';
     remoteSDPTextarea.value = '';
-    fileProgress.value = 0;
-    fileProgressText.textContent = '';
+    clearFileProgress();
     waitingForServerOffer = false;
 }
 
@@ -253,6 +337,7 @@ function setupPeerConnection({ createDataChannel = false } = {}) {
 
 function setupDataChannel(channel) {
     channel.binaryType = 'arraybuffer';
+    channel.bufferedAmountLowThreshold = 512 * 1024;
     channel.addEventListener('open', () => {
         logMessage('DataChannel open', 'peer');
         updateConnStatus();
@@ -261,6 +346,8 @@ function setupDataChannel(channel) {
         logMessage('DataChannel closed', 'peer');
         updateConnStatus();
         resetUI();
+        incomingFile = null;
+        clearFileProgress('Transfer cancelled.');
     });
 
     // File assembly state
@@ -279,9 +366,15 @@ function setupDataChannel(channel) {
                         received: 0,
                         buffers: []
                     };
-                    fileProgressText.textContent = `Receiving "${incomingFile.name}" (0 / ${incomingFile.size})`;
                     fileProgress.value = 0;
                     fileProgress.max = 100;
+                    fileProgressText.textContent = `Receiving "${incomingFile.name}" (0 / ${incomingFile.size})`;
+                    return;
+                }
+                if (obj && obj.type === 'file-error') {
+                    incomingFile = null;
+                    clearFileProgress(`Peer could not send "${obj.name || 'file'}"${obj.reason ? `: ${obj.reason}` : ''}`);
+                    logMessage(`Peer file transfer failed${obj.name ? `: ${obj.name}` : ''}${obj.reason ? ` (${obj.reason})` : ''}`, 'peer');
                     return;
                 }
             } catch (e) {
@@ -423,76 +516,38 @@ fileInput.addEventListener('change', async (e) => {
     if (!file) return;
     if (!dc || dc.readyState !== 'open') {
         alert('DataChannel not open yet.');
+        fileInput.value = '';
         return;
     }
 
     const id = Date.now().toString(36);
     const meta = { type: 'file-meta', id, name: file.name, size: file.size };
-    dc.send(JSON.stringify(meta));
-    fileProgressText.textContent = `Sending "${file.name}" (0 / ${file.size})`;
-    fileProgress.value = 0;
-    fileProgress.max = 100;
-
-    // prefer stream(), fallback to FileReader
-    if (file.stream) {
-        const stream = file.stream();
-        const reader = stream.getReader();
-        let sent = 0;
-        while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            let offset = 0;
-            while (offset < value.byteLength) {
-                const slice = value.slice(offset, offset + CHUNK_SIZE);
-                dc.send(slice.buffer);
-                sent += slice.byteLength;
-                offset += slice.byteLength;
-                const percent = (sent / file.size) * 100;
-                fileProgress.value = percent;
-                fileProgressText.textContent = `Sending "${file.name}" (${sent} / ${file.size})`;
-                await new Promise(r => setTimeout(r, 0));
-            }
-        }
-    } else {
-        // FileReader fallback
-        let offset = 0;
-        const reader = new FileReader();
-        reader.addEventListener('load', async (evt) => {
-            const buffer = evt.target.result;
-            let off = 0;
-            while (off < buffer.byteLength) {
-                const end = Math.min(off + CHUNK_SIZE, buffer.byteLength);
-                const chunk = buffer.slice(off, end);
-                dc.send(chunk);
-                off = end;
-                const percent = ((off + offset) / file.size) * 100;
-                fileProgress.value = percent;
-                fileProgressText.textContent = `Sending "${file.name}" (${Math.min(off + offset, file.size)} / ${file.size})`;
-                await new Promise(r => setTimeout(r, 0));
-            }
-            // continue until all read
-            if (offset < file.size) {
-                readSlice(offset);
-            } else {
-                fileProgressText.textContent = `Sent "${file.name}" (${file.size} bytes)`;
-                fileProgress.value = 100;
-                logMessage(`Sent file: ${file.name} (${Math.round(file.size / 1024)} KB)`, 'me');
-                fileInput.value = '';
-            }
-        });
-
-        function readSlice(o) {
-            offset = o;
-            const slice = file.slice(offset, offset + CHUNK_SIZE);
-            reader.readAsArrayBuffer(slice);
-        }
-        readSlice(0);
+    try {
+        ensureChannelOpen();
+        dc.send(JSON.stringify(meta));
+    } catch (err) {
+        handleFileSendFailure(id, file.name, err?.message || 'failed to send metadata');
+        fileInput.value = '';
+        return;
     }
 
-    if (file.stream) {
+    fileProgress.value = 0;
+    fileProgress.max = 100;
+    fileProgressText.textContent = `Sending "${file.name}" (0 / ${file.size})`;
+
+    try {
+        if (file.stream) {
+            await sendFileFromStream(file);
+        } else {
+            await sendFileFromArrayBuffer(file);
+        }
         fileProgressText.textContent = `Sent "${file.name}" (${file.size} bytes)`;
         fileProgress.value = 100;
         logMessage(`Sent file: ${file.name} (${Math.round(file.size / 1024)} KB)`, 'me');
+    } catch (err) {
+        const reason = err?.message || 'transfer aborted';
+        handleFileSendFailure(id, file.name, reason);
+    } finally {
         fileInput.value = '';
     }
 });
