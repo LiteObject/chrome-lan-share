@@ -418,10 +418,12 @@ function setupDataChannel(channel) {
 
     let incomingFile = null; // {id, name, size, received, buffers: []}
     let missingMetadataNotified = false;
+    let ignoreOrphanBinary = false;
 
-    const clearReceiveState = (message) => {
+    const clearReceiveState = (message, { allowOrphanChunks = false } = {}) => {
         incomingFile = null;
         missingMetadataNotified = false;
+        ignoreOrphanBinary = allowOrphanChunks;
         if (typeof message === 'string') {
             clearFileProgress(message);
         }
@@ -437,7 +439,7 @@ function setupDataChannel(channel) {
         logMessage('DataChannel closed', 'peer');
         updateConnStatus();
         resetUI();
-        clearReceiveState('Transfer cancelled.');
+        clearReceiveState('Transfer cancelled.', { allowOrphanChunks: true });
     });
 
     channel.addEventListener('message', (evt) => {
@@ -453,6 +455,7 @@ function setupDataChannel(channel) {
                         buffers: []
                     };
                     missingMetadataNotified = false;
+                    ignoreOrphanBinary = false;
                     fileProgress.value = 0;
                     fileProgress.max = 100;
                     fileProgressText.textContent = `Receiving "${incomingFile.name}" (0 / ${incomingFile.size})`;
@@ -460,14 +463,14 @@ function setupDataChannel(channel) {
                         if (!incomingFile) return;
                         const name = incomingFile.name;
                         sendFileSignal({ type: 'file-cancel', id: incomingFile.id, name, reason: 'receiver cancelled' });
-                        clearReceiveState(`Receive cancelled for "${name}"`);
+                        clearReceiveState(`Receive cancelled for "${name}"`, { allowOrphanChunks: true });
                         logMessage(`File receive cancelled: ${name}`, 'peer');
                     }, 'Cancel Receive');
                     return;
                 }
                 if (obj && obj.type === 'file-error') {
                     if (incomingFile) {
-                        clearReceiveState(`Peer could not send "${obj.name || 'file'}"${obj.reason ? `: ${obj.reason}` : ''}`);
+                        clearReceiveState(`Peer could not send "${obj.name || 'file'}"${obj.reason ? `: ${obj.reason}` : ''}`, { allowOrphanChunks: true });
                         logMessage(`Peer file transfer failed${obj.name ? `: ${obj.name}` : ''}${obj.reason ? ` (${obj.reason})` : ''}`, 'peer');
                     }
                     if (activeSend && (!obj.id || activeSend.id === obj.id)) {
@@ -487,9 +490,9 @@ function setupDataChannel(channel) {
                 if (obj && obj.type === 'file-cancel') {
                     const reason = obj.reason || 'peer cancelled';
                     if (incomingFile) {
-                        clearReceiveState(`Peer cancelled receive of "${incomingFile.name}"`);
+                        clearReceiveState(`Peer cancelled receive of "${incomingFile.name}"`, { allowOrphanChunks: true });
                     } else {
-                        clearReceiveState(`Peer cancelled transfer${obj.name ? `: ${obj.name}` : ''}`);
+                        clearReceiveState(`Peer cancelled transfer${obj.name ? `: ${obj.name}` : ''}`, { allowOrphanChunks: true });
                     }
                     if (activeSend && (!obj.id || activeSend.id === obj.id)) {
                         activeSend.cancelRequested = true;
@@ -516,9 +519,12 @@ function setupDataChannel(channel) {
 
         if (evt.data instanceof ArrayBuffer) {
             if (!incomingFile) {
+                if (ignoreOrphanBinary) {
+                    return;
+                }
                 if (!missingMetadataNotified) {
                     missingMetadataNotified = true;
-                    clearReceiveState('Receiving failed: missing metadata. Requested peer to resend.');
+                    clearReceiveState('Receiving failed: missing metadata. Requested peer to resend.', { allowOrphanChunks: true });
                     notifyPeerFileError(null, null, 'missing metadata before file data');
                     logMessage('File receive failed (missing metadata). Requested peer to resend.', 'peer');
                 }
