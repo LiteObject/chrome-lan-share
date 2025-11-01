@@ -199,6 +199,15 @@ progress::-webkit-progress-bar {
   border-radius: 4px;
 }
 
+#fileProgressText {
+  margin-top: 6px;
+}
+
+#cancelTransfer {
+  width: 100%;
+  margin-top: 8px;
+}
+
 progress::-webkit-progress-value {
   background: var(--primary-color);
   border-radius: 4px;

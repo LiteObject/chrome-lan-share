@@ -19,6 +19,7 @@ const sendMsgBtn = document.getElementById('sendMsg');
 const fileInput = document.getElementById('fileInput');
 const fileProgress = document.getElementById('fileProgress');
 const fileProgressText = document.getElementById('fileProgressText');
+const cancelTransferBtn = document.getElementById('cancelTransfer');
 
 const useServerCheckbox = document.getElementById('useServer');
 const connectServerBtn = document.getElementById('connectServer');
@@ -39,11 +40,44 @@ let isOfferer = false;
 let ws = null;
 let useServer = false;
 let waitingForServerOffer = false;
+let activeSend = null;
+let cancelCurrentTransfer = null;
+
+function setCancelAction(handler, label = 'Cancel Transfer') {
+    if (!cancelTransferBtn) {
+        cancelCurrentTransfer = null;
+        return;
+    }
+    cancelCurrentTransfer = handler || null;
+    if (cancelCurrentTransfer) {
+        cancelTransferBtn.disabled = false;
+        cancelTransferBtn.hidden = false;
+        cancelTransferBtn.textContent = label;
+    } else {
+        cancelTransferBtn.disabled = true;
+        cancelTransferBtn.hidden = true;
+        cancelTransferBtn.textContent = 'Cancel Transfer';
+    }
+}
 
 function clearFileProgress(message = '') {
     fileProgress.value = 0;
     fileProgress.max = 100;
     fileProgressText.textContent = message;
+}
+
+if (cancelTransferBtn) {
+    cancelTransferBtn.addEventListener('click', () => {
+        if (cancelCurrentTransfer) {
+            try {
+                cancelCurrentTransfer();
+            } catch (err) {
+                console.error('Failed to cancel transfer', err);
+            }
+        }
+    });
+} else {
+    console.warn('Cancel transfer button not found in DOM');
 }
 
 function ensureChannelOpen() {
@@ -53,12 +87,24 @@ function ensureChannelOpen() {
 }
 
 async function sendChunk(chunk) {
+    if (activeSend && (activeSend.cancelRequested || activeSend.peerCancelled)) {
+        const reason = activeSend.cancelReason || (activeSend.peerCancelled ? 'peer cancelled' : 'sender cancelled');
+        throw new Error(reason);
+    }
     ensureChannelOpen();
+    if (activeSend && (activeSend.cancelRequested || activeSend.peerCancelled)) {
+        const reason = activeSend.cancelReason || (activeSend.peerCancelled ? 'peer cancelled' : 'sender cancelled');
+        throw new Error(reason);
+    }
     dc.send(chunk);
     if (dc.bufferedAmount > BUFFERED_AMOUNT_LIMIT) {
         while (dc.bufferedAmount > BUFFERED_AMOUNT_LIMIT) {
             await new Promise((resolve) => setTimeout(resolve, 20));
             ensureChannelOpen();
+            if (activeSend && (activeSend.cancelRequested || activeSend.peerCancelled)) {
+                const reason = activeSend.cancelReason || (activeSend.peerCancelled ? 'peer cancelled' : 'sender cancelled');
+                throw new Error(reason);
+            }
         }
     } else {
         await new Promise((resolve) => setTimeout(resolve, 0));
@@ -71,24 +117,47 @@ function updateSendProgress(file, sent) {
     fileProgressText.textContent = `Sending "${file.name}" (${sent} / ${file.size})`;
 }
 
-function notifyPeerFileError(id, name, reason) {
-    if (!dc || dc.readyState !== 'open') return;
+function sendFileSignal(payload) {
+    if (!dc || dc.readyState !== 'open') return false;
     try {
-        dc.send(JSON.stringify({ type: 'file-error', id, name, reason }));
+        dc.send(JSON.stringify(payload));
+        return true;
     } catch (err) {
-        console.error('Failed to notify peer about file transfer error', err);
+        console.error('Failed to send file control message', err);
+        return false;
     }
+}
+
+function notifyPeerFileError(id, name, reason) {
+    sendFileSignal({ type: 'file-error', id, name, reason });
 }
 
 function handleFileSendFailure(id, name, reason) {
     const friendlyReason = reason === 'DataChannel is not open' ? 'channel closed' : reason;
-    notifyPeerFileError(id, name, friendlyReason);
-    clearFileProgress(`Send failed for "${name}"${friendlyReason ? `: ${friendlyReason}` : ''}`);
-    logMessage(`File send failed: ${name}${friendlyReason ? ` (${friendlyReason})` : ''}`, 'peer');
+    const suppressNotify = friendlyReason && ['sender cancelled', 'receiver cancelled', 'peer cancelled', 'missing metadata before file data', 'peer error'].includes(friendlyReason);
+    if (!suppressNotify) {
+        notifyPeerFileError(id, name, friendlyReason);
+    }
+    let statusText = `Send failed for "${name}"${friendlyReason ? `: ${friendlyReason}` : ''}`;
+    if (friendlyReason === 'sender cancelled') {
+        statusText = `Send cancelled for "${name}"`;
+        logMessage(`File send cancelled: ${name}`, 'peer');
+    } else if (friendlyReason === 'receiver cancelled' || friendlyReason === 'peer cancelled') {
+        statusText = `Send cancelled by peer${name ? `: "${name}"` : ''}`;
+        logMessage(`Peer cancelled file transfer${name ? `: ${name}` : ''}`, 'peer');
+    } else {
+        logMessage(`File send failed: ${name}${friendlyReason ? ` (${friendlyReason})` : ''}`, 'peer');
+    }
+    clearFileProgress(statusText);
+    activeSend = null;
+    setCancelAction(null);
 }
 
 async function sendFileFromStream(file) {
     const reader = file.stream().getReader();
+    if (activeSend) {
+        activeSend.reader = reader;
+    }
     let sent = 0;
     try {
         while (true) {
@@ -107,6 +176,9 @@ async function sendFileFromStream(file) {
         }
     } finally {
         reader.releaseLock?.();
+        if (activeSend && activeSend.reader === reader) {
+            activeSend.reader = null;
+        }
     }
 }
 
@@ -117,6 +189,10 @@ async function sendFileFromArrayBuffer(file) {
     for (let offset = 0; offset < view.byteLength;) {
         const end = Math.min(offset + CHUNK_SIZE, view.byteLength);
         const slice = view.subarray(offset, end);
+        if (activeSend && (activeSend.cancelRequested || activeSend.peerCancelled)) {
+            const reason = activeSend.cancelReason || (activeSend.peerCancelled ? 'peer cancelled' : 'sender cancelled');
+            throw new Error(reason);
+        }
         await sendChunk(slice);
         sent += slice.byteLength;
         updateSendProgress(file, sent);
@@ -135,6 +211,7 @@ function resetUI() {
     remoteSDPTextarea.value = '';
     clearFileProgress();
     waitingForServerOffer = false;
+    setCancelAction(null);
 }
 
 resetUI();
@@ -338,23 +415,32 @@ function setupPeerConnection({ createDataChannel = false } = {}) {
 function setupDataChannel(channel) {
     channel.binaryType = 'arraybuffer';
     channel.bufferedAmountLowThreshold = 512 * 1024;
+
+    let incomingFile = null; // {id, name, size, received, buffers: []}
+    let missingMetadataNotified = false;
+
+    const clearReceiveState = (message) => {
+        incomingFile = null;
+        missingMetadataNotified = false;
+        if (typeof message === 'string') {
+            clearFileProgress(message);
+        }
+        setCancelAction(null);
+    };
+
     channel.addEventListener('open', () => {
         logMessage('DataChannel open', 'peer');
         updateConnStatus();
     });
+
     channel.addEventListener('close', () => {
         logMessage('DataChannel closed', 'peer');
         updateConnStatus();
         resetUI();
-        incomingFile = null;
-        clearFileProgress('Transfer cancelled.');
+        clearReceiveState('Transfer cancelled.');
     });
 
-    // File assembly state
-    let incomingFile = null; // {id, name, size, received, buffers: []}
-
     channel.addEventListener('message', (evt) => {
-        // If it's string -> control message or text message
         if (typeof evt.data === 'string') {
             try {
                 const obj = JSON.parse(evt.data);
@@ -366,32 +452,79 @@ function setupDataChannel(channel) {
                         received: 0,
                         buffers: []
                     };
+                    missingMetadataNotified = false;
                     fileProgress.value = 0;
                     fileProgress.max = 100;
                     fileProgressText.textContent = `Receiving "${incomingFile.name}" (0 / ${incomingFile.size})`;
+                    setCancelAction(() => {
+                        if (!incomingFile) return;
+                        const name = incomingFile.name;
+                        sendFileSignal({ type: 'file-cancel', id: incomingFile.id, name, reason: 'receiver cancelled' });
+                        clearReceiveState(`Receive cancelled for "${name}"`);
+                        logMessage(`File receive cancelled: ${name}`, 'peer');
+                    }, 'Cancel Receive');
                     return;
                 }
                 if (obj && obj.type === 'file-error') {
-                    incomingFile = null;
-                    clearFileProgress(`Peer could not send "${obj.name || 'file'}"${obj.reason ? `: ${obj.reason}` : ''}`);
-                    logMessage(`Peer file transfer failed${obj.name ? `: ${obj.name}` : ''}${obj.reason ? ` (${obj.reason})` : ''}`, 'peer');
+                    if (incomingFile) {
+                        clearReceiveState(`Peer could not send "${obj.name || 'file'}"${obj.reason ? `: ${obj.reason}` : ''}`);
+                        logMessage(`Peer file transfer failed${obj.name ? `: ${obj.name}` : ''}${obj.reason ? ` (${obj.reason})` : ''}`, 'peer');
+                    }
+                    if (activeSend && (!obj.id || activeSend.id === obj.id)) {
+                        const peerReason = obj.reason || 'peer error';
+                        activeSend.cancelRequested = true;
+                        activeSend.peerCancelled = true;
+                        activeSend.cancelReason = peerReason;
+                        if (activeSend.reader && activeSend.reader.cancel) {
+                            try { activeSend.reader.cancel(peerReason); } catch (cancelErr) {
+                                console.warn('Failed to cancel reader after peer error', cancelErr);
+                            }
+                        }
+                        handleFileSendFailure(activeSend.id, activeSend.name, peerReason);
+                    }
+                    return;
+                }
+                if (obj && obj.type === 'file-cancel') {
+                    const reason = obj.reason || 'peer cancelled';
+                    if (incomingFile) {
+                        clearReceiveState(`Peer cancelled receive of "${incomingFile.name}"`);
+                    } else {
+                        clearReceiveState(`Peer cancelled transfer${obj.name ? `: ${obj.name}` : ''}`);
+                    }
+                    if (activeSend && (!obj.id || activeSend.id === obj.id)) {
+                        activeSend.cancelRequested = true;
+                        activeSend.peerCancelled = true;
+                        activeSend.cancelReason = reason;
+                        if (activeSend.reader && activeSend.reader.cancel) {
+                            try { activeSend.reader.cancel(reason); } catch (cancelErr) {
+                                console.warn('Failed to cancel reader after peer cancellation', cancelErr);
+                            }
+                        }
+                        handleFileSendFailure(activeSend.id, activeSend.name, 'receiver cancelled');
+                    } else {
+                        logMessage('Peer cancelled file transfer', 'peer');
+                    }
                     return;
                 }
             } catch (e) {
                 // Not JSON -> treat as plain chat text
             }
 
-            // plain chat string
             logMessage(evt.data, 'peer');
             return;
         }
 
-        // Binary chunk
         if (evt.data instanceof ArrayBuffer) {
             if (!incomingFile) {
-                console.warn('Received binary without metadata - ignoring');
+                if (!missingMetadataNotified) {
+                    missingMetadataNotified = true;
+                    clearReceiveState('Receiving failed: missing metadata. Requested peer to resend.');
+                    notifyPeerFileError(null, null, 'missing metadata before file data');
+                    logMessage('File receive failed (missing metadata). Requested peer to resend.', 'peer');
+                }
                 return;
             }
+
             incomingFile.buffers.push(evt.data);
             incomingFile.received += evt.data.byteLength;
             const percent = (incomingFile.received / incomingFile.size) * 100;
@@ -399,7 +532,6 @@ function setupDataChannel(channel) {
             fileProgressText.textContent = `Receiving "${incomingFile.name}" (${incomingFile.received} / ${incomingFile.size})`;
 
             if (incomingFile.received >= incomingFile.size) {
-                // assemble
                 const blob = new Blob(incomingFile.buffers);
                 const url = URL.createObjectURL(blob);
                 const link = document.createElement('a');
@@ -413,7 +545,7 @@ function setupDataChannel(channel) {
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
                 fileProgressText.textContent = `Received "${incomingFile.name}"`;
                 fileProgress.value = 100;
-                incomingFile = null;
+                clearReceiveState();
             }
         }
     });
@@ -520,8 +652,37 @@ fileInput.addEventListener('change', async (e) => {
         return;
     }
 
+    if (activeSend) {
+        alert('Another file transfer is already in progress. Please wait until it completes.');
+        fileInput.value = '';
+        return;
+    }
+
     const id = Date.now().toString(36);
     const meta = { type: 'file-meta', id, name: file.name, size: file.size };
+
+    activeSend = {
+        id,
+        name: file.name,
+        size: file.size,
+        cancelRequested: false,
+        cancelReason: '',
+        peerCancelled: false,
+        reader: null
+    };
+
+    setCancelAction(() => {
+        if (!activeSend || activeSend.cancelRequested) return;
+        activeSend.cancelRequested = true;
+        activeSend.cancelReason = 'sender cancelled';
+        sendFileSignal({ type: 'file-cancel', id: activeSend.id, name: activeSend.name, reason: 'sender cancelled' });
+        if (activeSend.reader && activeSend.reader.cancel) {
+            try { activeSend.reader.cancel('sender cancelled'); } catch (err) {
+                console.warn('Failed to cancel file stream after sender cancellation', err);
+            }
+        }
+    }, 'Cancel Send');
+
     try {
         ensureChannelOpen();
         dc.send(JSON.stringify(meta));
@@ -544,9 +705,13 @@ fileInput.addEventListener('change', async (e) => {
         fileProgressText.textContent = `Sent "${file.name}" (${file.size} bytes)`;
         fileProgress.value = 100;
         logMessage(`Sent file: ${file.name} (${Math.round(file.size / 1024)} KB)`, 'me');
+        activeSend = null;
+        setCancelAction(null);
     } catch (err) {
         const reason = err?.message || 'transfer aborted';
-        handleFileSendFailure(id, file.name, reason);
+        if (activeSend) {
+            handleFileSendFailure(id, file.name, reason);
+        }
     } finally {
         fileInput.value = '';
     }
