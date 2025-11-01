@@ -6,7 +6,7 @@ Implements WebRTC (Web Real-Time Communication) DataChannel with **manual or aut
 ## How to install (developer mode)
 1. Save the project folder (contains `manifest.json`, `popup.html`, `popup.js`, `styles.css`).
 2. In Chrome, go to `chrome://extensions/` → enable **Developer mode** → **Load unpacked** → select the folder.
-3. Click the extension icon to open the popup on two (or more) machines on your LAN.
+3. Click the extension icon to open the side panel on two (or more) machines on your LAN. The panel stays active while it remains visible.
 
 ## Quick usage
 
@@ -23,6 +23,11 @@ Implements WebRTC (Web Real-Time Communication) DataChannel with **manual or aut
 - On Device A: Click **Create Offer**.
 - On Device B: Click **Wait for Offer**.
 - Connections establish automatically without manual copying.
+
+### Side Panel Workflow
+- The extension opens inside Chrome's side panel (Chrome 116+) so the UI persists while you browse other tabs.
+- If the side panel is closed, the WebRTC connection tears down just like closing the popup would.
+- You can toggle the panel from the extension icon or via Chrome's side panel shortcut (`Ctrl+Shift+.` / `Cmd+Shift+.`) and selecting **Chrome LAN Share** from the drop-down.
 
 ## How It Works: WebRTC & SDP
 

@@ -6,8 +6,13 @@
   "author": "LiteObject <Lite.Object@gmail.com>",
   "homepage_url": "https://github.com/LiteObject/chrome-lan-share",
   "action": {
-    "default_popup": "popup.html",
     "default_title": "chrome-lan-share"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js"
   },
   "icons": {
     "16": "icon-data-sharing-16.png",
@@ -15,7 +20,8 @@
     "128": "icon-data-sharing-128.png"
   },
   "permissions": [
-    "storage"
+    "storage",
+    "sidePanel"
   ],
   "host_permissions": []
 }

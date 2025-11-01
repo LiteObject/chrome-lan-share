@@ -1,6 +1,6 @@
 body {
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial;
-  width: 420px;
+  width: min(420px, 100%);
   padding: 12px;
   box-sizing: border-box;
   color: var(--text-color);
@@ -125,6 +125,14 @@ button {
 button:hover {
   background: #005a99;
   /* box-shadow: var(--button-shadow); */
+}
+
+button#disconnect {
+  background: #c62828;
+}
+
+button#disconnect:hover {
+  background: #a61d1d;
 }
 
 button:disabled {

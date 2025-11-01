@@ -5,6 +5,7 @@
 const createOfferBtn = document.getElementById('createOffer');
 const createAnswerBtn = document.getElementById('createAnswer');
 const setRemoteBtn = document.getElementById('setRemote');
+const disconnectBtn = document.getElementById('disconnect');
 const localSDPTextarea = document.getElementById('localSDP');
 const remoteSDPTextarea = document.getElementById('remoteSDP');
 const copyLocalBtn = document.getElementById('copyLocal');
@@ -34,6 +35,21 @@ let dc = null;
 let isOfferer = false;
 let ws = null;
 let useServer = false;
+
+function resetUI() {
+    iceStatus.textContent = 'ICE: —';
+    updateConnStatus();
+    copyLocalBtn.disabled = true;
+    setRemoteBtn.disabled = true;
+    createOfferBtn.disabled = useServer && !ws;
+    createAnswerBtn.disabled = useServer && !ws;
+    localSDPTextarea.value = '';
+    remoteSDPTextarea.value = '';
+    fileProgress.value = 0;
+    fileProgressText.textContent = '';
+}
+
+resetUI();
 
 darkModeToggle.addEventListener('click', () => {
     document.body.classList.toggle('dark');
@@ -82,6 +98,20 @@ useServerCheckbox.addEventListener('change', () => {
     }
 });
 
+disconnectBtn.addEventListener('click', () => {
+    if (dc) {
+        try { dc.close(); } catch (err) { console.error(err); }
+        dc = null;
+    }
+    if (pc) {
+        try { pc.close(); } catch (err) { console.error(err); }
+        pc = null;
+    }
+    isOfferer = false;
+    resetUI();
+    logMessage('Connection reset by user', 'peer');
+});
+
 connectServerBtn.addEventListener('click', () => {
     if (ws) ws.close();
     const addr = serverIPInput.value.trim();
@@ -119,6 +149,7 @@ connectServerBtn.addEventListener('click', () => {
             createOfferBtn.disabled = true;
             createAnswerBtn.disabled = true;
         }
+        resetUI();
     };
     ws.onerror = (error) => {
         logMessage('Failed to connect to signaling server at ' + serverAddr, 'peer');
@@ -177,6 +208,12 @@ function setupPeerConnection({ createDataChannel = false } = {}) {
         iceStatus.textContent = `ICE: ${pc.iceGatheringState}`;
     });
 
+    pc.addEventListener('iceconnectionstatechange', () => {
+        if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+            logMessage('ICE connection lost', 'peer');
+        }
+    });
+
     if (createDataChannel) {
         dc = pc.createDataChannel('chat', { ordered: true });
         setupDataChannel(dc);
@@ -200,6 +237,7 @@ function setupDataChannel(channel) {
     channel.addEventListener('close', () => {
         logMessage('DataChannel closed', 'peer');
         updateConnStatus();
+        resetUI();
     });
 
     // File assembly state
