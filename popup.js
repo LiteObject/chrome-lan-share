@@ -30,6 +30,8 @@ const chatTab = document.getElementById('chatTab');
 const setupContent = document.getElementById('setupContent');
 const chatContent = document.getElementById('chatContent');
 
+const CHUNK_SIZE = 16 * 1024; // send files in 16KB chunks to balance speed and reliability
+
 let pc = null;
 let dc = null;
 let isOfferer = false;
