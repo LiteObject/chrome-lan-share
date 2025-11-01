@@ -35,6 +35,7 @@ let dc = null;
 let isOfferer = false;
 let ws = null;
 let useServer = false;
+let waitingForServerOffer = false;
 
 function resetUI() {
     iceStatus.textContent = 'ICE: —';
@@ -47,6 +48,7 @@ function resetUI() {
     remoteSDPTextarea.value = '';
     fileProgress.value = 0;
     fileProgressText.textContent = '';
+    waitingForServerOffer = false;
 }
 
 resetUI();
@@ -72,6 +74,7 @@ chatTab.addEventListener('click', () => {
 
 useServerCheckbox.addEventListener('change', () => {
     useServer = useServerCheckbox.checked;
+    waitingForServerOffer = false;
     connectServerBtn.disabled = !useServer;
     if (!useServer && ws) {
         ws.close();
@@ -129,16 +132,26 @@ connectServerBtn.addEventListener('click', () => {
             createAnswerBtn.disabled = false;
         }
     };
-    ws.onmessage = (event) => {
+    ws.onmessage = async (event) => {
         const data = JSON.parse(event.data);
         if (data.type === 'offer') {
             remoteSDPTextarea.value = JSON.stringify(data.sdp);
             if (!isOfferer) {
-                createAnswerBtn.click();
+                try {
+                    await respondToOffer(data.sdp, 'server');
+                } catch (err) {
+                    console.error('Failed to handle offer from server', err);
+                }
             }
         } else if (data.type === 'answer') {
             remoteSDPTextarea.value = JSON.stringify(data.sdp);
-            setRemoteBtn.click();
+            if (isOfferer) {
+                try {
+                    await applyRemoteAnswer(data.sdp, 'server');
+                } catch (err) {
+                    console.error('Failed to apply answer from server', err);
+                }
+            }
         }
     };
     ws.onclose = () => {
@@ -333,64 +346,36 @@ createOfferBtn.addEventListener('click', async () => {
 });
 
 createAnswerBtn.addEventListener('click', async () => {
-    // This path: set remote (offer) and create answer for it
-    // For safety, if pc exists, reset it
-    if (pc) {
-        try { pc.close(); } catch (e) { }
-        pc = null;
-        dc = null;
-    }
-    isOfferer = false;
-    createOfferBtn.disabled = true;
-    createAnswerBtn.disabled = true;
-    setRemoteBtn.disabled = true;
+    const remoteText = remoteSDPTextarea.value.trim();
 
-    setupPeerConnection({ createDataChannel: false });
-
-    try {
-        const remote = JSON.parse(remoteSDPTextarea.value.trim());
-        await pc.setRemoteDescription(remote);
-    } catch (e) {
-        alert('Invalid remote SDP JSON. Make sure you pasted the offer.');
-        createOfferBtn.disabled = false;
+    if (useServer && ws && remoteText === '') {
+        waitingForServerOffer = true;
+        if (pc) {
+            try { pc.close(); } catch (e) { }
+            pc = null;
+            dc = null;
+        }
+        setupPeerConnection({ createDataChannel: false });
+        isOfferer = false;
+        createOfferBtn.disabled = true;
+        createAnswerBtn.disabled = true;
+        setRemoteBtn.disabled = true;
+        logMessage('Waiting for offer from signaling server...', 'peer');
         return;
     }
 
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-
-    iceStatus.textContent = `ICE: gathering...`;
-
-    await waitForIceGatheringComplete(pc);
-
-    localSDPTextarea.value = JSON.stringify(pc.localDescription);
-    copyLocalBtn.disabled = false;
-    updateConnStatus();
-    iceStatus.textContent = `ICE: ${pc.iceGatheringState}`;
-    // Now user copies local SDP and gives it to offerer
-
-    if (ws) {
-        ws.send(JSON.stringify({ type: 'answer', sdp: pc.localDescription }));
+    if (!remoteText) {
+        alert('Remote SDP is empty. Paste the offer from your peer.');
+        createOfferBtn.disabled = false;
+        createAnswerBtn.disabled = false;
+        return;
     }
+
+    await respondToOffer(remoteText, 'manual');
 });
 
 setRemoteBtn.addEventListener('click', async () => {
-    // For offerer: set remote answer
-    if (!pc || !isOfferer) {
-        alert('No local offer in progress. Create an offer first on this side.');
-        return;
-    }
-    try {
-        const remote = JSON.parse(remoteSDPTextarea.value.trim());
-        await pc.setRemoteDescription(remote);
-        updateConnStatus();
-        setRemoteBtn.disabled = true;
-        createOfferBtn.disabled = false;
-        createAnswerBtn.disabled = false;
-    } catch (e) {
-        alert('Invalid remote SDP JSON. Make sure you pasted the answer.');
-        console.error(e);
-    }
+    await applyRemoteAnswer(remoteSDPTextarea.value.trim(), 'manual');
 });
 
 copyLocalBtn.addEventListener('click', async () => {
@@ -501,3 +486,117 @@ fileInput.addEventListener('change', async (e) => {
         fileInput.value = '';
     }
 });
+
+async function respondToOffer(remoteSource, origin = 'manual') {
+    const wasWaiting = waitingForServerOffer;
+    waitingForServerOffer = false;
+
+    if (origin === 'server') {
+        logMessage('Received offer from signaling server', 'peer');
+    }
+
+    let remoteDesc;
+    try {
+        remoteDesc = typeof remoteSource === 'string' ? JSON.parse(remoteSource) : remoteSource;
+    } catch (err) {
+        console.error('Failed to parse remote offer', err);
+        if (origin === 'manual') {
+            alert('Invalid remote SDP JSON. Make sure you pasted the offer.');
+        } else {
+            logMessage('Received malformed offer from signaling server', 'peer');
+        }
+        createOfferBtn.disabled = false;
+        createAnswerBtn.disabled = false;
+        return;
+    }
+
+    if (pc && !wasWaiting) {
+        try { pc.close(); } catch (err) { }
+        pc = null;
+        dc = null;
+    }
+
+    if (!pc) {
+        setupPeerConnection({ createDataChannel: false });
+    }
+
+    isOfferer = false;
+    createOfferBtn.disabled = true;
+    createAnswerBtn.disabled = true;
+    setRemoteBtn.disabled = true;
+
+    try {
+        await pc.setRemoteDescription(remoteDesc);
+    } catch (err) {
+        console.error('Failed to apply remote offer', err);
+        if (origin === 'manual') {
+            alert('Failed to apply remote offer. Please verify the SDP.');
+        } else {
+            logMessage('Failed to apply offer from signaling server', 'peer');
+        }
+        createOfferBtn.disabled = false;
+        createAnswerBtn.disabled = false;
+        return;
+    }
+
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    iceStatus.textContent = `ICE: gathering...`;
+
+    await waitForIceGatheringComplete(pc);
+
+    localSDPTextarea.value = JSON.stringify(pc.localDescription);
+    copyLocalBtn.disabled = false;
+    updateConnStatus();
+    iceStatus.textContent = `ICE: ${pc.iceGatheringState}`;
+
+    if (useServer && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'answer', sdp: pc.localDescription }));
+        if (origin === 'server') {
+            logMessage('Sent answer via signaling server', 'peer');
+        }
+    } else if (origin === 'server') {
+        logMessage('Could not relay answer: signaling server connection closed', 'peer');
+    }
+}
+
+async function applyRemoteAnswer(remoteSource, origin = 'manual') {
+    if (!pc || !isOfferer) {
+        if (origin === 'manual') {
+            alert('No local offer in progress. Create an offer first on this side.');
+        }
+        return;
+    }
+
+    let remoteDesc;
+    try {
+        remoteDesc = typeof remoteSource === 'string' ? JSON.parse(remoteSource) : remoteSource;
+    } catch (err) {
+        console.error('Failed to parse remote answer', err);
+        if (origin === 'manual') {
+            alert('Invalid remote SDP JSON. Make sure you pasted the answer.');
+        } else {
+            logMessage('Received malformed answer from signaling server', 'peer');
+        }
+        return;
+    }
+
+    try {
+        await pc.setRemoteDescription(remoteDesc);
+        updateConnStatus();
+        setRemoteBtn.disabled = true;
+        createOfferBtn.disabled = false;
+        createAnswerBtn.disabled = false;
+        if (origin === 'server') {
+            logMessage('Applied answer from signaling server', 'peer');
+        }
+    } catch (err) {
+        console.error('Failed to apply remote answer', err);
+        if (origin === 'manual') {
+            alert('Invalid remote SDP JSON. Make sure you pasted the answer.');
+        } else {
+            logMessage('Failed to apply answer from signaling server', 'peer');
+        }
+    }
+}

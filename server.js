@@ -35,26 +35,30 @@ printLANAddresses(8080);
 wss.on('connection', (ws) => {
     const clientId = `client-${nextClientId++}`;
     const address = ws._socket?.remoteAddress || 'unknown';
-    clients.set(ws, { id: clientId, address });
+    const port = ws._socket?.remotePort || 'unknown';
+    const clientKey = `${address}:${port}`;
+    clients.set(ws, { id: clientId, address, port, key: clientKey });
 
-    console.log(`[${clientId}] connected from ${address}. Active clients: ${clients.size}`);
+    console.log(`[${clientId}] connected from ${address}:${port}. Active clients: ${clients.size}`);
 
     ws.on('message', (message) => {
         let data;
         try {
             data = JSON.parse(message.toString());
         } catch (err) {
-            console.warn(`[${clientId}] sent invalid JSON: ${err.message}`);
+            console.warn(`[${clientId}] (${address}:${port}) sent invalid JSON: ${err.message}`);
             return;
         }
 
-        console.log(`[${clientId}] -> ${data.type || 'unknown'} message. Relaying to peers...`);
+        console.log(
+            `[${clientId}] (${address}:${port}) -> ${data.type || 'unknown'} message. Relaying to peers...`
+        );
 
         // Broadcast to all other clients
         for (const [client, info] of clients.entries()) {
             if (client !== ws && client.readyState === WebSocket.OPEN) {
                 client.send(message);
-                console.log(`  relayed to ${info.id}`);
+                console.log(`  relayed to ${info.id} (${info.address}:${info.port})`);
             }
         }
     });
@@ -62,10 +66,10 @@ wss.on('connection', (ws) => {
     ws.on('close', (code, reason) => {
         clients.delete(ws);
         const textReason = reason && reason.toString() ? ` (${reason.toString()})` : '';
-        console.log(`[${clientId}] disconnected with code ${code}${textReason}. Active clients: ${clients.size}`);
+        console.log(`[${clientId}] disconnected ${address}:${port} with code ${code}${textReason}. Active clients: ${clients.size}`);
     });
 
     ws.on('error', (err) => {
-        console.error(`[${clientId}] error:`, err.message);
+        console.error(`[${clientId}] error from ${address}:${port}:`, err.message);
     });
 });
