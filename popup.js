@@ -420,12 +420,14 @@ function setupDataChannel(channel) {
     let missingMetadataNotified = false;
     let ignoreOrphanBinary = false;
 
-    const clearReceiveState = (message, { allowOrphanChunks = false } = {}) => {
+    const clearReceiveState = (message, { allowOrphanChunks = false, updateProgress = true } = {}) => {
         incomingFile = null;
         missingMetadataNotified = false;
         ignoreOrphanBinary = allowOrphanChunks;
-        if (typeof message === 'string') {
+        if (updateProgress && typeof message === 'string') {
             clearFileProgress(message);
+        } else if (updateProgress && typeof message !== 'string') {
+            clearFileProgress('');
         }
         setCancelAction(null);
     };
@@ -524,7 +526,7 @@ function setupDataChannel(channel) {
                 }
                 if (!missingMetadataNotified) {
                     missingMetadataNotified = true;
-                    clearReceiveState('Receiving failed: missing metadata. Requested peer to resend.', { allowOrphanChunks: true });
+                    clearReceiveState(null, { allowOrphanChunks: true, updateProgress: false });
                     notifyPeerFileError(null, null, 'missing metadata before file data');
                     logMessage('File receive failed (missing metadata). Requested peer to resend.', 'peer');
                 }
