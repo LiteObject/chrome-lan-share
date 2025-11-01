@@ -133,7 +133,15 @@ connectServerBtn.addEventListener('click', () => {
         }
     };
     ws.onmessage = async (event) => {
-        const data = JSON.parse(event.data);
+        let payload = event.data;
+        if (payload instanceof Blob) {
+            payload = await payload.text();
+        }
+        if (payload instanceof ArrayBuffer) {
+            payload = new TextDecoder().decode(payload);
+        }
+
+        const data = typeof payload === 'string' ? JSON.parse(payload) : payload;
         if (data.type === 'offer') {
             remoteSDPTextarea.value = JSON.stringify(data.sdp);
             if (!isOfferer) {

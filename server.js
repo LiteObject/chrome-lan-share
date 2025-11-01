@@ -44,7 +44,11 @@ wss.on('connection', (ws) => {
     ws.on('message', (message) => {
         let data;
         try {
-            data = JSON.parse(message.toString());
+            if (typeof message === 'string') {
+                data = JSON.parse(message);
+            } else {
+                data = JSON.parse(message.toString());
+            }
         } catch (err) {
             console.warn(`[${clientId}] (${address}:${port}) sent invalid JSON: ${err.message}`);
             return;
@@ -54,10 +58,12 @@ wss.on('connection', (ws) => {
             `[${clientId}] (${address}:${port}) -> ${data.type || 'unknown'} message. Relaying to peers...`
         );
 
+        const payload = JSON.stringify(data);
+
         // Broadcast to all other clients
         for (const [client, info] of clients.entries()) {
             if (client !== ws && client.readyState === WebSocket.OPEN) {
-                client.send(message);
+                client.send(payload);
                 console.log(`  relayed to ${info.id} (${info.address}:${info.port})`);
             }
         }
