@@ -2,32 +2,70 @@
 // Run with: node server.js
 // This provides automated signaling over LAN via WebSocket.
 
+
 const WebSocket = require('ws');
+const os = require('os');
 
 const wss = new WebSocket.Server({ host: '0.0.0.0', port: 8080 });
 
-let clients = [];
+const clients = new Map(); // ws -> { id, address }
+let nextClientId = 1;
 
-console.log('Signaling server running on ws://0.0.0.0:8080 (accessible via your LAN IP, e.g., ws://192.168.1.100:8080)');
+function printLANAddresses(port) {
+    const nets = os.networkInterfaces();
+    let found = false;
+    console.log('Signaling server running on:');
+    for (const name of Object.keys(nets)) {
+        for (const net of nets[name]) {
+            // Only show IPv4, non-internal
+            if (net.family === 'IPv4' && !net.internal) {
+                console.log(`  ws://${net.address}:${port}`);
+                found = true;
+            }
+        }
+    }
+    if (!found) {
+        console.log('  ws://localhost:' + port);
+    }
+    console.log('(Use one of these addresses on your other device)');
+}
+
+printLANAddresses(8080);
 
 wss.on('connection', (ws) => {
-    console.log('New client connected');
-    clients.push(ws);
+    const clientId = `client-${nextClientId++}`;
+    const address = ws._socket?.remoteAddress || 'unknown';
+    clients.set(ws, { id: clientId, address });
+
+    console.log(`[${clientId}] connected from ${address}. Active clients: ${clients.size}`);
 
     ws.on('message', (message) => {
-        const data = JSON.parse(message.toString());
-        console.log('Received:', data.type);
+        let data;
+        try {
+            data = JSON.parse(message.toString());
+        } catch (err) {
+            console.warn(`[${clientId}] sent invalid JSON: ${err.message}`);
+            return;
+        }
+
+        console.log(`[${clientId}] -> ${data.type || 'unknown'} message. Relaying to peers...`);
 
         // Broadcast to all other clients
-        clients.forEach(client => {
+        for (const [client, info] of clients.entries()) {
             if (client !== ws && client.readyState === WebSocket.OPEN) {
                 client.send(message);
+                console.log(`  relayed to ${info.id}`);
             }
-        });
+        }
     });
 
-    ws.on('close', () => {
-        console.log('Client disconnected');
-        clients = clients.filter(client => client !== ws);
+    ws.on('close', (code, reason) => {
+        clients.delete(ws);
+        const textReason = reason && reason.toString() ? ` (${reason.toString()})` : '';
+        console.log(`[${clientId}] disconnected with code ${code}${textReason}. Active clients: ${clients.size}`);
+    });
+
+    ws.on('error', (err) => {
+        console.error(`[${clientId}] error:`, err.message);
     });
 });
