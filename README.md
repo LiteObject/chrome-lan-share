@@ -29,6 +29,12 @@ Implements WebRTC (Web Real-Time Communication) DataChannel with **manual or aut
 - If the side panel is closed, the WebRTC connection tears down just like closing the popup would.
 - You can toggle the panel from the extension icon or via Chrome's side panel shortcut (`Ctrl+Shift+.` / `Cmd+Shift+.`) and selecting **Chrome LAN Share** from the drop-down.
 
+### File Transfers
+- Click **Send File** to pick a file; progress appears directly beneath the button.
+- A **Cancel Transfer** button shows while you are sending, and a **Cancel Receive** button appears while you are receiving—use these to safely abort stalled transfers.
+- When a file finishes downloading, the receiver gets a link (e.g. “Download example.zip”). Click it to trigger Chrome's download prompt; extensions cannot auto-save files.
+- Only one outgoing transfer per browser runs at a time. You can still exchange uploads simultaneously (each peer sending one file).
+
 ## How It Works: WebRTC & SDP
 
 This extension is built on two core web technologies: **WebRTC** and **SDP**.
@@ -88,6 +94,7 @@ sequenceDiagram
 ## Notes & limitations
 - Files are sent via ordered DataChannel and reconstructed on the receiver.
 - For more convenience, automated signaling via a local WebSocket server is supported (optional).
+- Transfers cancel cleanly if either side closes the side panel or hits **Cancel**; progress text updates to reflect the reason.
 
 ### Connecting Over the Internet (NAT Traversal)
 
@@ -111,6 +118,10 @@ pc = new RTCPeerConnection({
 ## Security
 - Only exchange SDP with trusted devices.
 - This demo does not include authentication — for production, add pairing tokens or passcodes and encryption.
+
+## Troubleshooting
+- **“Receiving failed: missing metadata. Requested peer to resend.”** — The receiver saw file data before the header (usually after a cancel or network blip). The sender will stop automatically; resend the file once both sides show idle progress.
+- If progress counts race far past the expected file size, reload the extension (`chrome://extensions/` → **Reload**) to ensure both peers have the latest code.
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
