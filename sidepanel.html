@@ -9,11 +9,6 @@
 </head>
 
 <body>
-    <div class="header">
-        <h1>LAN Share</h1>
-        <button id="darkModeToggle" title="Toggle dark mode">🌙</button>
-    </div>
-
     <div class="tabs">
         <button id="setupTab" class="tab active">Setup</button>
         <button id="chatTab" class="tab">Chat</button>
@@ -52,6 +47,10 @@
             <label>Remote SDP (paste peer's SDP here)</label>
             <textarea id="remoteSDP" rows="6"></textarea>
         </section>
+
+        <div class="dark-toggle-row">
+            <button id="darkModeToggle" title="Toggle dark mode">🌙 Dark Mode</button>
+        </div>
     </div>
 
     <div id="chatContent" class="tab-content">

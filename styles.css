@@ -10,14 +10,12 @@ body {
 }
 
 :root {
-  --primary-color: #007acc;
-  --secondary-color: #aeaeae;
+  --primary-color: #00adcc;
+  --secondary-color: #7d7d7d;
   --text-color: #111;
   --border-color: #ddd;
-  --hover-bg: #e6f7ff;
   --message-me-bg: #e6f7ff;
   --message-peer-bg: #f5f5f5;
-  --button-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
   --bg-color: #f9f9f9;
   --section-bg: #fff;
   --status-connected-bg: #40e0d0;
@@ -26,50 +24,26 @@ body {
   --status-connecting-color: #111;
   --status-error-bg: #ef4444;
   --status-error-color: #fff;
-  --button-hover-bg: #005a99;
-  --disconnect-bg: #c62828;
-  --disconnect-hover-bg: #a61d1d;
+  --button-hover-bg: #008ca5;
+  --disconnect-bg: #b91c1c;
+  --disconnect-hover-bg: #861515;
   --button-disabled-bg: #ccc;
 }
 
 body.dark {
-  --primary-color: #005a99;
   --text-color: #f9f9f9;
   --border-color: #555;
-  --hover-bg: #003d66;
   --message-me-bg: #003d66;
   --message-peer-bg: #333;
   --bg-color: #222;
   --section-bg: #333;
   --status-connected-bg: #1ba99a;
-  --status-connected-color: #fff;
   --status-connecting-bg: #d29507;
-  --status-connecting-color: #111;
   --status-error-bg: #b91c1c;
-  --status-error-color: #fff;
-  --button-hover-bg: #007acc;
-  --disconnect-bg: #a61d1d;
+  --button-hover-bg: #008ca5;
+  --disconnect-bg: #b91c1d;
   --disconnect-hover-bg: #8c1616;
   --button-disabled-bg: #555;
-}
-
-h1 {
-  font-size: 18px;
-  margin: 0 0 12px 0;
-  color: var(--primary-color);
-}
-
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.header button {
-  padding: 4px 8px;
-  font-size: 16px;
-  margin: 0;
 }
 
 .tabs {
@@ -144,7 +118,6 @@ button {
 
 button:hover {
   background: var(--button-hover-bg);
-  /* box-shadow: var(--button-shadow); */
 }
 
 button#disconnect {
@@ -162,6 +135,12 @@ button:disabled {
 
 .col { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
 .row { display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
+
+.dark-toggle-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
 
 .messages {
   border: 1px solid var(--border-color);

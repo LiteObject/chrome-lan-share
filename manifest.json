@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "chrome-lan-share",
+  "name": "LAN Share",
   "description": "Peer-to-peer LAN message & file sharing between Chrome browser instances (manual or automated signaling).",
   "version": "1.0.0",
   "author": "LiteObject <Lite.Object@gmail.com>",
   "homepage_url": "https://github.com/LiteObject/chrome-lan-share",
   "action": {
-    "default_title": "chrome-lan-share"
+    "default_title": "LAN Share"
   },
   "side_panel": {
     "default_path": "sidepanel.html"
