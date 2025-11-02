@@ -20,6 +20,16 @@ body {
   --button-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
   --bg-color: #f9f9f9;
   --section-bg: #fff;
+  --status-connected-bg: #40e0d0;
+  --status-connected-color: #fff;
+  --status-connecting-bg: #fbbf24;
+  --status-connecting-color: #111;
+  --status-error-bg: #ef4444;
+  --status-error-color: #fff;
+  --button-hover-bg: #005a99;
+  --disconnect-bg: #c62828;
+  --disconnect-hover-bg: #a61d1d;
+  --button-disabled-bg: #ccc;
 }
 
 body.dark {
@@ -31,6 +41,16 @@ body.dark {
   --message-peer-bg: #333;
   --bg-color: #222;
   --section-bg: #333;
+  --status-connected-bg: #1ba99a;
+  --status-connected-color: #fff;
+  --status-connecting-bg: #d29507;
+  --status-connecting-color: #111;
+  --status-error-bg: #b91c1c;
+  --status-error-color: #fff;
+  --button-hover-bg: #007acc;
+  --disconnect-bg: #a61d1d;
+  --disconnect-hover-bg: #8c1616;
+  --button-disabled-bg: #555;
 }
 
 h1 {
@@ -123,25 +143,25 @@ button {
 }
 
 button:hover {
-  background: #005a99;
+  background: var(--button-hover-bg);
   /* box-shadow: var(--button-shadow); */
 }
 
 button#disconnect {
-  background: #c62828;
+  background: var(--disconnect-bg);
 }
 
 button#disconnect:hover {
-  background: #a61d1d;
+  background: var(--disconnect-hover-bg);
 }
 
 button:disabled {
-  background: #ccc;
+  background: var(--button-disabled-bg);
   cursor: not-allowed;
 }
 
-.col { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
-.row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.col { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
+.row { display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
 
 .messages {
   border: 1px solid var(--border-color);
@@ -242,18 +262,18 @@ progress::-moz-progress-bar {
 }
 
 .status-connected {
-  background: #16a34a !important;
-  color: #fff !important;
+  background: var(--status-connected-bg) !important;
+  color: var(--status-connected-color) !important;
 }
 
 .status-connecting {
-  background: #fbbf24 !important;
-  color: #111 !important;
+  background: var(--status-connecting-bg) !important;
+  color: var(--status-connecting-color) !important;
 }
 
 .status-error {
-  background: #ef4444 !important;
-  color: #fff !important;
+  background: var(--status-error-bg) !important;
+  color: var(--status-error-color) !important;
 }
 
 .status-disconnected {
