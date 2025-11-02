@@ -43,8 +43,10 @@
             <textarea id="localSDP" readonly rows="6"></textarea>
             <div class="row">
                 <button id="copyLocal" title="Copy SDP to clipboard">Copy Local SDP</button>
-                <span id="iceStatus">ICE: —</span>
-                <span id="connStatus">Conn: —</span>
+                <button id="copyAnswer" hidden disabled title="Copy the generated answer to clipboard">Copy Local
+                    Answer</button>
+                <span id="iceStatus" class="status-pill">ICE: —</span>
+                <span id="connStatus" class="status-pill status-disconnected">Conn: —</span>
             </div>
 
             <label>Remote SDP (paste peer's SDP here)</label>
@@ -63,13 +65,16 @@
 
             <label>Send File</label>
             <input id="fileInput" type="file" title="Select file to send" />
-            <progress id="fileProgress" max="100" value="0" title="File transfer progress"></progress>
+            <div class="file-progress-row">
+                <progress id="fileProgress" max="100" value="0" title="File transfer progress"></progress>
+                <span id="fileProgressPercent" class="progress-label">0%</span>
+            </div>
             <div id="fileProgressText" class="small"></div>
             <button id="cancelTransfer" hidden disabled title="Cancel the active file transfer">Cancel Transfer</button>
         </section>
     </div>
 
-    <script src="popup.js"></script>
+    <script src="sidepanel.js"></script>
 </body>
 
 </html>

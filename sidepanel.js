@@ -1,6 +1,6 @@
-// popup.js
+// sidepanel.js
 // Simple manual-signaling WebRTC DataChannel for text & file transfer (chunked).
-// Works inside the extension popup (DOM available).
+// Works inside the side panel UI (DOM available).
 
 const createOfferBtn = document.getElementById('createOffer');
 const createAnswerBtn = document.getElementById('createAnswer');
@@ -9,6 +9,7 @@ const disconnectBtn = document.getElementById('disconnect');
 const localSDPTextarea = document.getElementById('localSDP');
 const remoteSDPTextarea = document.getElementById('remoteSDP');
 const copyLocalBtn = document.getElementById('copyLocal');
+const copyAnswerBtn = document.getElementById('copyAnswer');
 const iceStatus = document.getElementById('iceStatus');
 const connStatus = document.getElementById('connStatus');
 
@@ -19,6 +20,7 @@ const sendMsgBtn = document.getElementById('sendMsg');
 const fileInput = document.getElementById('fileInput');
 const fileProgress = document.getElementById('fileProgress');
 const fileProgressText = document.getElementById('fileProgressText');
+const fileProgressPercent = document.getElementById('fileProgressPercent');
 const cancelTransferBtn = document.getElementById('cancelTransfer');
 
 const useServerCheckbox = document.getElementById('useServer');
@@ -34,7 +36,13 @@ const chatContent = document.getElementById('chatContent');
 const CHUNK_SIZE = 16 * 1024; // send files in 16KB chunks to balance speed and reliability
 const BUFFERED_AMOUNT_LIMIT = 1024 * 1024; // pause if DataChannel buffers exceed 1MB
 const BUFFERED_AMOUNT_LOW_THRESHOLD = Math.floor(BUFFERED_AMOUNT_LIMIT / 2);
-const ICE_GATHER_TIMEOUT_MS = 5000;
+const ICE_GATHER_TIMEOUT_MS = 15000; // allow slower networks more time to surface ICE candidates
+const SEND_WINDOW_TIMEOUT_MS = 5000;
+const SEND_WINDOW_CHECK_INTERVAL_MS = 50;
+const NEXT_TICK_DELAY_MS = 0;
+const PROGRESS_UPDATE_THROTTLE_MS = 16;
+const MAX_FILE_METADATA_PER_MINUTE = 10;
+const FILE_METADATA_WINDOW_MS = 60_000;
 
 let pc = null;
 let dc = null;
@@ -44,6 +52,9 @@ let useServer = false;
 let waitingForServerOffer = false;
 let activeSend = null;
 let cancelCurrentTransfer = null;
+let fileMetaCounter = 0;
+let fileMetaResetTimeout = null;
+let lastProgressUpdate = 0;
 
 function normalizeServerAddress(raw) {
     if (!raw) return null;
@@ -65,8 +76,11 @@ function normalizeServerAddress(raw) {
         if (!url.hostname) {
             return null;
         }
-        if (!url.port) {
-            // leave port empty if user provided hostname only
+        if (url.port) {
+            const portNum = Number(url.port);
+            if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+                return null;
+            }
         }
         if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
             return null;
@@ -99,6 +113,21 @@ function clearFileProgress(message = '') {
     fileProgress.value = 0;
     fileProgress.max = 100;
     fileProgressText.textContent = message;
+    if (fileProgressPercent) {
+        fileProgressPercent.textContent = '0%';
+    }
+    lastProgressUpdate = 0;
+}
+
+function showError(message, { alertUser = false, level = 'error', prefixLog = true } = {}) {
+    const fn = console[level] ? console[level].bind(console) : console.error.bind(console);
+    fn(message);
+    if (prefixLog) {
+        logMessage(`Error: ${message}`, 'peer');
+    }
+    if (alertUser) {
+        alert(message);
+    }
 }
 
 if (cancelTransferBtn) {
@@ -129,7 +158,7 @@ function assertSendState(state) {
 }
 
 function waitForNextMicrotask() {
-    return new Promise((resolve) => setTimeout(resolve, 0));
+    return new Promise((resolve) => setTimeout(resolve, NEXT_TICK_DELAY_MS));
 }
 
 async function waitForSendWindow(state, channel = dc) {
@@ -180,7 +209,7 @@ async function waitForSendWindow(state, channel = dc) {
             if (channel.bufferedAmount <= BUFFERED_AMOUNT_LIMIT) {
                 onResolve();
             }
-        }, 50);
+        }, SEND_WINDOW_CHECK_INTERVAL_MS);
 
         const timeout = setTimeout(() => {
             try {
@@ -192,7 +221,7 @@ async function waitForSendWindow(state, channel = dc) {
             } catch (err) {
                 onReject(err);
             }
-        }, 5000);
+        }, SEND_WINDOW_TIMEOUT_MS);
 
         const cleanup = () => {
             clearInterval(checkInterval);
@@ -214,6 +243,49 @@ async function waitForSendWindow(state, channel = dc) {
     });
 }
 
+function cleanupConnections({ closeWebSocket = false } = {}) {
+    if (dc) {
+        try {
+            dc.onopen = null;
+            dc.onclose = null;
+            dc.onerror = null;
+            dc.onmessage = null;
+            dc.onbufferedamountlow = null;
+            dc.close();
+        } catch (err) {
+            console.warn('Failed to close DataChannel', err);
+        }
+        dc = null;
+    }
+
+    if (pc) {
+        try {
+            pc.onicecandidate = null;
+            pc.oniceconnectionstatechange = null;
+            pc.onicegatheringstatechange = null;
+            pc.onconnectionstatechange = null;
+            pc.ondatachannel = null;
+            pc.close();
+        } catch (err) {
+            console.warn('Failed to close RTCPeerConnection', err);
+        }
+        pc = null;
+    }
+
+    if (closeWebSocket && ws) {
+        try {
+            ws.onopen = null;
+            ws.onmessage = null;
+            ws.onerror = null;
+            ws.onclose = null;
+            ws.close();
+        } catch (err) {
+            console.warn('Failed to close signaling WebSocket', err);
+        }
+        ws = null;
+    }
+}
+
 async function sendChunk(chunk, sendState = activeSend) {
     const state = sendState || activeSend;
     assertSendState(state);
@@ -224,8 +296,12 @@ async function sendChunk(chunk, sendState = activeSend) {
     }
     await waitForSendWindow(state, channel);
     assertSendState(state);
-    ensureChannelOpen();
-    channel.send(chunk);
+    if (!channel || channel.readyState !== 'open') {
+        throw new Error('DataChannel is not open');
+    }
+    const payload = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+    assertSendState(state);
+    channel.send(payload);
     if (channel.bufferedAmount > BUFFERED_AMOUNT_LIMIT) {
         await waitForSendWindow(state, channel);
     } else {
@@ -234,10 +310,18 @@ async function sendChunk(chunk, sendState = activeSend) {
 }
 
 function updateSendProgress(file, sent) {
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (sent < file.size && now - lastProgressUpdate < PROGRESS_UPDATE_THROTTLE_MS) {
+        return;
+    }
+    lastProgressUpdate = now;
     const percent = file.size ? (sent / file.size) * 100 : 0;
     fileProgress.value = percent;
     const prettyPercent = percent ? percent.toFixed(1) : '0.0';
     fileProgressText.textContent = `Sending "${file.name}" (${sent} / ${file.size}) – ${prettyPercent}%`;
+    if (fileProgressPercent) {
+        fileProgressPercent.textContent = `${prettyPercent}%`;
+    }
 }
 
 function sendFileSignal(payload) {
@@ -302,7 +386,8 @@ async function sendFileFromStream(file) {
             while (offset < chunkView.byteLength) {
                 const end = Math.min(offset + CHUNK_SIZE, chunkView.byteLength);
                 const slice = chunkView.subarray(offset, end);
-                await sendChunk(slice, sendState);
+                const safeCopy = slice.slice();
+                await sendChunk(safeCopy, sendState);
                 sent += slice.byteLength;
                 updateSendProgress(file, sent);
                 offset = end;
@@ -390,6 +475,11 @@ function resetUI() {
     updateConnStatus();
     copyLocalBtn.disabled = true;
     setRemoteBtn.disabled = true;
+    if (copyAnswerBtn) {
+        copyAnswerBtn.hidden = true;
+        copyAnswerBtn.disabled = true;
+        copyAnswerBtn.textContent = 'Copy Local Answer';
+    }
     localSDPTextarea.value = '';
     remoteSDPTextarea.value = '';
     clearFileProgress();
@@ -419,11 +509,36 @@ chatTab.addEventListener('click', () => {
     setupContent.classList.remove('active');
 });
 
+document.addEventListener('keydown', (event) => {
+    if (event.defaultPrevented) return;
+    const activeTag = document.activeElement?.tagName;
+    const isTyping = activeTag === 'INPUT' || activeTag === 'TEXTAREA';
+
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'd') {
+        event.preventDefault();
+        disconnectBtn.click();
+        return;
+    }
+
+    if (!isTyping && event.key === 'Escape' && !cancelTransferBtn.hidden && !cancelTransferBtn.disabled) {
+        event.preventDefault();
+        cancelTransferBtn.click();
+    }
+});
+
 useServerCheckbox.addEventListener('change', () => {
     useServer = useServerCheckbox.checked;
     waitingForServerOffer = false;
     if (!useServer && ws) {
-        ws.close();
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+        try {
+            ws.close();
+        } catch (err) {
+            console.warn('Failed to close signaling WebSocket on toggle', err);
+        }
         ws = null;
     }
     updateSignalingUI();
@@ -433,14 +548,7 @@ disconnectBtn.addEventListener('click', () => {
     if (activeSend) {
         handleFileSendFailure(activeSend.id, activeSend.name, 'connection reset', activeSend);
     }
-    if (dc) {
-        try { dc.close(); } catch (err) { console.error(err); }
-        dc = null;
-    }
-    if (pc) {
-        try { pc.close(); } catch (err) { console.error(err); }
-        pc = null;
-    }
+    cleanupConnections({ closeWebSocket: false });
     isOfferer = false;
     waitingForServerOffer = false;
     resetUI();
@@ -449,18 +557,28 @@ disconnectBtn.addEventListener('click', () => {
 
 connectServerBtn.addEventListener('click', () => {
     if (!useServer) {
-        alert('Enable "Use Signaling Server" before connecting.');
+        showError('Enable "Use Signaling Server" before connecting.', { alertUser: true, prefixLog: false });
         return;
     }
 
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-        ws.close();
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+        try {
+            ws.close();
+        } catch (err) {
+            console.warn('Failed to close existing signaling WebSocket', err);
+        }
+        ws = null;
+        updateSignalingUI();
         return;
     }
 
     const normalized = normalizeServerAddress(serverIPInput.value);
     if (!normalized) {
-        alert('Please enter a valid WebSocket address (e.g., ws://localhost:8080).');
+        showError('Please enter a valid WebSocket address (e.g., ws://localhost:8080).', { alertUser: true, prefixLog: false });
         return;
     }
 
@@ -469,7 +587,7 @@ connectServerBtn.addEventListener('click', () => {
         socket = new WebSocket(normalized);
     } catch (err) {
         console.error('Failed to initiate WebSocket', err);
-        alert('Invalid WebSocket URL. Please verify the address and try again.');
+        showError('Invalid WebSocket URL. Please verify the address and try again.', { alertUser: true });
         return;
     }
 
@@ -555,42 +673,95 @@ function logMessage(text, who = 'peer') {
 }
 
 function waitForIceGatheringComplete(peer, timeoutMs = ICE_GATHER_TIMEOUT_MS) {
+    if (!peer) {
+        return Promise.resolve({ complete: false, reason: 'no-peer' });
+    }
+
+    if (peer.iceGatheringState === 'complete') {
+        return Promise.resolve({ complete: true, reason: 'already-complete' });
+    }
+
     return new Promise((resolve) => {
-        if (peer.iceGatheringState === 'complete') {
-            resolve(true);
-            return;
-        }
+        let settled = false;
 
-        let resolved = false;
-
-        const finalize = (complete) => {
-            if (resolved) return;
-            resolved = true;
-            peer.removeEventListener('icegatheringstatechange', onChange);
-            clearTimeout(timeout);
-            resolve(complete);
+        const finish = (complete, reason) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve({ complete, reason });
         };
 
-        const onChange = () => {
+        const onIceGatheringChange = () => {
+            updateIceStatus();
             if (peer.iceGatheringState === 'complete') {
-                finalize(true);
-            } else {
-                updateIceStatus();
+                finish(true, 'gathering-complete');
             }
         };
 
-        const timeout = setTimeout(() => {
-            finalize(false);
-        }, timeoutMs);
+        const onIceCandidate = (event) => {
+            if (!event.candidate) {
+                finish(true, 'end-of-candidates');
+            }
+        };
 
-        peer.addEventListener('icegatheringstatechange', onChange);
+        const cleanup = () => {
+            try { peer.removeEventListener('icegatheringstatechange', onIceGatheringChange); } catch (err) { /* noop */ }
+            try { peer.removeEventListener('icecandidate', onIceCandidate); } catch (err) { /* noop */ }
+            if (timer) {
+                clearTimeout(timer);
+            }
+        };
+
+        const timer = timeoutMs > 0
+            ? setTimeout(() => {
+                if (peer.iceGatheringState === 'complete') {
+                    finish(true, 'gathering-complete');
+                    return;
+                }
+                finish(false, 'timeout');
+            }, timeoutMs)
+            : null;
+
+        try {
+            peer.addEventListener('icegatheringstatechange', onIceGatheringChange);
+        } catch (err) {
+            console.warn('Failed to watch icegatheringstatechange', err);
+        }
+        try {
+            peer.addEventListener('icecandidate', onIceCandidate);
+        } catch (err) {
+            console.warn('Failed to watch icecandidate events', err);
+        }
     });
 }
 
 function updateConnStatus() {
     const pcState = pc ? pc.connectionState || '—' : '—';
     const dcState = dc ? dc.readyState : '—';
-    connStatus.textContent = `Conn: ${pcState} | DC: ${dcState}`;
+    const statusClass = (() => {
+        if (dcState === 'open') return 'status-connected';
+        if (pcState === 'connecting' || dcState === 'connecting') return 'status-connecting';
+        if (pcState === 'failed' || pcState === 'disconnected') return 'status-error';
+        return 'status-disconnected';
+    })();
+
+    connStatus.classList.remove('status-connected', 'status-connecting', 'status-error', 'status-disconnected');
+    connStatus.classList.add(statusClass);
+
+    const statusBadge = (() => {
+        switch (statusClass) {
+            case 'status-connected':
+                return '[OK]';
+            case 'status-connecting':
+                return '[...]';
+            case 'status-error':
+                return '[ERR]';
+            default:
+                return '[--]';
+        }
+    })();
+
+    connStatus.textContent = `${statusBadge} Conn: ${pcState} | DC: ${dcState}`;
 }
 
 function updateIceStatus(extra = '') {
@@ -629,14 +800,36 @@ function updateSignalingUI() {
     }
 }
 
+function validateSDP(desc) {
+    if (!desc || typeof desc !== 'object') {
+        throw new Error('SDP must be an object.');
+    }
+    if (typeof desc.type !== 'string' || !['offer', 'answer', 'pranswer', 'rollback'].includes(desc.type)) {
+        throw new Error(`Invalid SDP type: ${desc.type}`);
+    }
+    if (typeof desc.sdp !== 'string' || !desc.sdp.trim()) {
+        throw new Error('SDP is missing the session description string.');
+    }
+    if (!desc.sdp.includes('v=0') || !desc.sdp.match(/\nm=.*\n?/)) {
+        throw new Error('SDP appears malformed.');
+    }
+}
+
 // Setup a new RTCPeerConnection and optionally create DataChannel
 function setupPeerConnection({ createDataChannel = false } = {}) {
-    dc = null;
-    pc = new RTCPeerConnection({
-        iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' }
-        ]
-    });
+    cleanupConnections({ closeWebSocket: false });
+    try {
+        pc = new RTCPeerConnection({
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' }
+            ]
+        });
+    } catch (err) {
+        showError('WebRTC failed to initialize. Ensure your browser supports RTCPeerConnection.', { alertUser: true });
+        console.error('RTCPeerConnection creation failed', err);
+        pc = null;
+        return null;
+    }
 
     const handleIceConnection = () => {
         updateConnStatus();
@@ -707,6 +900,7 @@ function setupDataChannel(channel) {
         if (activeSend) {
             handleFileSendFailure(activeSend.id, activeSend.name, 'channel closed', activeSend);
         }
+        cleanupConnections({ closeWebSocket: false });
         resetUI();
         clearReceiveState('Transfer cancelled.', { allowOrphanChunks: true });
     });
@@ -716,6 +910,17 @@ function setupDataChannel(channel) {
             try {
                 const obj = JSON.parse(evt.data);
                 if (obj && obj.type === 'file-meta') {
+                    fileMetaCounter += 1;
+                    if (fileMetaCounter > MAX_FILE_METADATA_PER_MINUTE) {
+                        logMessage('Peer is sending file requests too quickly. Ignoring this request.', 'peer');
+                        notifyPeerFileError(obj.id ?? null, obj.name ?? null, 'rate limited');
+                        return;
+                    }
+                    clearTimeout(fileMetaResetTimeout);
+                    fileMetaResetTimeout = setTimeout(() => {
+                        fileMetaCounter = 0;
+                    }, FILE_METADATA_WINDOW_MS);
+
                     incomingFile = {
                         id: obj.id,
                         name: obj.name,
@@ -727,7 +932,11 @@ function setupDataChannel(channel) {
                     ignoreOrphanBinary = false;
                     fileProgress.value = 0;
                     fileProgress.max = 100;
-                    fileProgressText.textContent = `Receiving "${incomingFile.name}" (0 / ${incomingFile.size}) – 0.0%`;
+                    fileProgressText.textContent = `Receiving "${incomingFile.name}" (${incomingFile.received} / ${incomingFile.size}) – 0.0%`;
+                    if (fileProgressPercent) {
+                        fileProgressPercent.textContent = '0.0%';
+                    }
+                    lastProgressUpdate = 0;
                     setCancelAction(() => {
                         if (!incomingFile) return;
                         const name = incomingFile.name;
@@ -816,10 +1025,17 @@ function setupDataChannel(channel) {
 
             incomingFile.buffers.push(binaryChunk);
             incomingFile.received += binaryChunk.byteLength;
-            const percent = incomingFile.size ? (incomingFile.received / incomingFile.size) * 100 : 0;
-            const prettyPercent = percent ? percent.toFixed(1) : '0.0';
-            fileProgress.value = percent;
-            fileProgressText.textContent = `Receiving "${incomingFile.name}" (${incomingFile.received} / ${incomingFile.size}) – ${prettyPercent}%`;
+            const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+            if (incomingFile.received >= incomingFile.size || now - lastProgressUpdate >= PROGRESS_UPDATE_THROTTLE_MS) {
+                lastProgressUpdate = now;
+                const percent = incomingFile.size ? (incomingFile.received / incomingFile.size) * 100 : 0;
+                const prettyPercent = percent ? percent.toFixed(1) : '0.0';
+                fileProgress.value = percent;
+                fileProgressText.textContent = `Receiving "${incomingFile.name}" (${incomingFile.received} / ${incomingFile.size}) – ${prettyPercent}%`;
+                if (fileProgressPercent) {
+                    fileProgressPercent.textContent = `${prettyPercent}%`;
+                }
+            }
 
             if (incomingFile.received >= incomingFile.size) {
                 const blob = new Blob(incomingFile.buffers);
@@ -835,6 +1051,9 @@ function setupDataChannel(channel) {
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
                 fileProgressText.textContent = `Received "${incomingFile.name}"`;
                 fileProgress.value = 100;
+                if (fileProgressPercent) {
+                    fileProgressPercent.textContent = '100%';
+                }
                 clearReceiveState();
             }
         }
@@ -847,25 +1066,39 @@ createOfferBtn.addEventListener('click', async () => {
     createAnswerBtn.disabled = true;
     setRemoteBtn.disabled = true;
 
-    setupPeerConnection({ createDataChannel: true });
+    const connection = setupPeerConnection({ createDataChannel: true });
+    if (!connection) {
+        createOfferBtn.disabled = false;
+        createAnswerBtn.disabled = false;
+        return;
+    }
 
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    let offer;
+    try {
+        offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+    } catch (err) {
+        showError('Failed to create offer. See console for details.', { alertUser: true });
+        console.error('createOffer error', err);
+        resetUI();
+        return;
+    }
 
     iceStatus.textContent = `ICE: gathering...`;
 
     // Wait until ICE gathering completes so we can share a complete SDP (no candidate exchange)
-    const iceComplete = await waitForIceGatheringComplete(pc);
+    const { complete: iceComplete, reason: iceReason } = await waitForIceGatheringComplete(pc);
+    if (!iceComplete) {
+        console.info(`ICE gathering did not finish before timeout (${iceReason}). Continuing with partial candidates.`);
+        logMessage('ICE gathering took longer than expected; continuing with partial candidate set.', 'peer');
+    }
 
     localSDPTextarea.value = JSON.stringify(pc.localDescription);
     copyLocalBtn.disabled = false;
     setRemoteBtn.disabled = false;
     createAnswerBtn.disabled = true;
 
-    updateIceStatus(iceComplete ? '' : '(timeout)');
-    if (!iceComplete) {
-        logMessage('ICE gathering timed out; using partial candidate set.', 'peer');
-    }
+    updateIceStatus(iceComplete ? '' : '(partial)');
     updateConnStatus();
 
     if (ws) {
@@ -878,12 +1111,13 @@ createAnswerBtn.addEventListener('click', async () => {
 
     if (useServer && ws && remoteText === '') {
         waitingForServerOffer = true;
-        if (pc) {
-            try { pc.close(); } catch (e) { }
-            pc = null;
-            dc = null;
+        cleanupConnections({ closeWebSocket: false });
+        const connection = setupPeerConnection({ createDataChannel: false });
+        if (!connection) {
+            createOfferBtn.disabled = false;
+            createAnswerBtn.disabled = false;
+            return;
         }
-        setupPeerConnection({ createDataChannel: false });
         isOfferer = false;
         createOfferBtn.disabled = true;
         createAnswerBtn.disabled = true;
@@ -893,7 +1127,7 @@ createAnswerBtn.addEventListener('click', async () => {
     }
 
     if (!remoteText) {
-        alert('Remote SDP is empty. Paste the offer from your peer.');
+        showError('Remote SDP is empty. Paste the offer from your peer.', { alertUser: true, prefixLog: false });
         createOfferBtn.disabled = false;
         createAnswerBtn.disabled = false;
         return;
@@ -920,11 +1154,31 @@ copyLocalBtn.addEventListener('click', async () => {
     }
 });
 
+if (copyAnswerBtn) {
+    copyAnswerBtn.addEventListener('click', async () => {
+        const text = localSDPTextarea.value.trim();
+        if (!text) {
+            showError('Nothing to copy yet. Generate an answer first.', { alertUser: true, prefixLog: false });
+            return;
+        }
+        try {
+            await navigator.clipboard.writeText(text);
+            copyAnswerBtn.textContent = 'Copied!';
+            setTimeout(() => copyAnswerBtn.textContent = 'Copy Local Answer', 1500);
+        } catch (e) {
+            localSDPTextarea.select();
+            document.execCommand('copy');
+            copyAnswerBtn.textContent = 'Copied!';
+            setTimeout(() => copyAnswerBtn.textContent = 'Copy Local Answer', 1500);
+        }
+    });
+}
+
 sendMsgBtn.addEventListener('click', () => {
     const txt = msgInput.value.trim();
     if (!txt) return;
     if (!dc || dc.readyState !== 'open') {
-        alert('DataChannel not open yet.');
+        showError('DataChannel not open yet.', { alertUser: true, prefixLog: false });
         return;
     }
     dc.send(txt);
@@ -940,13 +1194,13 @@ fileInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     if (!dc || dc.readyState !== 'open') {
-        alert('DataChannel not open yet.');
+        showError('DataChannel not open yet.', { alertUser: true, prefixLog: false });
         fileInput.value = '';
         return;
     }
 
     if (activeSend) {
-        alert('Another file transfer is already in progress. Please wait until it completes.');
+        showError('Another file transfer is already in progress. Please wait until it completes.', { alertUser: true });
         fileInput.value = '';
         return;
     }
@@ -988,6 +1242,10 @@ fileInput.addEventListener('change', async (e) => {
     fileProgress.value = 0;
     fileProgress.max = 100;
     fileProgressText.textContent = `Sending "${file.name}" (0 / ${file.size}) – 0.0%`;
+    if (fileProgressPercent) {
+        fileProgressPercent.textContent = '0.0%';
+    }
+    lastProgressUpdate = 0;
 
     try {
         if (file.stream) {
@@ -1021,10 +1279,11 @@ async function respondToOffer(remoteSource, origin = 'manual') {
     let remoteDesc;
     try {
         remoteDesc = typeof remoteSource === 'string' ? JSON.parse(remoteSource) : remoteSource;
+        validateSDP(remoteDesc);
     } catch (err) {
-        console.error('Failed to parse remote offer', err);
+        console.error('Failed to parse or validate remote offer', err);
         if (origin === 'manual') {
-            alert('Invalid remote SDP JSON. Make sure you pasted the offer.');
+            showError('Invalid remote offer. Please ensure you pasted the full SDP block.', { alertUser: true });
         } else {
             logMessage('Received malformed offer from signaling server', 'peer');
         }
@@ -1034,13 +1293,16 @@ async function respondToOffer(remoteSource, origin = 'manual') {
     }
 
     if (pc && !wasWaiting) {
-        try { pc.close(); } catch (err) { }
-        pc = null;
-        dc = null;
+        cleanupConnections({ closeWebSocket: false });
     }
 
     if (!pc) {
-        setupPeerConnection({ createDataChannel: false });
+        const connection = setupPeerConnection({ createDataChannel: false });
+        if (!connection) {
+            createOfferBtn.disabled = false;
+            createAnswerBtn.disabled = false;
+            return;
+        }
     }
 
     isOfferer = false;
@@ -1053,7 +1315,7 @@ async function respondToOffer(remoteSource, origin = 'manual') {
     } catch (err) {
         console.error('Failed to apply remote offer', err);
         if (origin === 'manual') {
-            alert('Failed to apply remote offer. Please verify the SDP.');
+            showError('Failed to apply remote offer. Please verify the SDP.', { alertUser: true });
         } else {
             logMessage('Failed to apply offer from signaling server', 'peer');
         }
@@ -1062,19 +1324,33 @@ async function respondToOffer(remoteSource, origin = 'manual') {
         return;
     }
 
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
+    try {
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+    } catch (err) {
+        console.error('Failed to create or apply answer', err);
+        showError('Failed to create answer. Please retry the connection.', { alertUser: origin === 'manual' });
+        createOfferBtn.disabled = false;
+        createAnswerBtn.disabled = false;
+        return;
+    }
 
     iceStatus.textContent = `ICE: gathering...`;
 
-    const iceComplete = await waitForIceGatheringComplete(pc);
+    const { complete: iceComplete, reason: iceReason } = await waitForIceGatheringComplete(pc);
+    if (!iceComplete) {
+        console.info(`ICE gathering did not finish before timeout while creating answer (${iceReason}). Continuing.`);
+        logMessage('ICE gathering took longer than expected while creating answer; continuing with partial candidate set.', 'peer');
+    }
 
     localSDPTextarea.value = JSON.stringify(pc.localDescription);
     copyLocalBtn.disabled = false;
     updateConnStatus();
-    updateIceStatus(iceComplete ? '' : '(timeout)');
-    if (!iceComplete) {
-        logMessage('ICE gathering timed out while creating answer; using partial candidate set.', 'peer');
+    updateIceStatus(iceComplete ? '' : '(partial)');
+    if (copyAnswerBtn) {
+        copyAnswerBtn.hidden = false;
+        copyAnswerBtn.disabled = false;
+        copyAnswerBtn.textContent = 'Copy Local Answer';
     }
 
     if (useServer && ws && ws.readyState === WebSocket.OPEN) {
@@ -1090,7 +1366,7 @@ async function respondToOffer(remoteSource, origin = 'manual') {
 async function applyRemoteAnswer(remoteSource, origin = 'manual') {
     if (!pc || !isOfferer) {
         if (origin === 'manual') {
-            alert('No local offer in progress. Create an offer first on this side.');
+            showError('No local offer in progress. Create an offer first on this side.', { alertUser: true, prefixLog: false });
         }
         return;
     }
@@ -1098,10 +1374,11 @@ async function applyRemoteAnswer(remoteSource, origin = 'manual') {
     let remoteDesc;
     try {
         remoteDesc = typeof remoteSource === 'string' ? JSON.parse(remoteSource) : remoteSource;
+        validateSDP(remoteDesc);
     } catch (err) {
         console.error('Failed to parse remote answer', err);
         if (origin === 'manual') {
-            alert('Invalid remote SDP JSON. Make sure you pasted the answer.');
+            showError('Invalid remote answer. Make sure you pasted the entire SDP.', { alertUser: true });
         } else {
             logMessage('Received malformed answer from signaling server', 'peer');
         }
@@ -1120,7 +1397,7 @@ async function applyRemoteAnswer(remoteSource, origin = 'manual') {
     } catch (err) {
         console.error('Failed to apply remote answer', err);
         if (origin === 'manual') {
-            alert('Invalid remote SDP JSON. Make sure you pasted the answer.');
+            showError('Failed to apply remote answer. Please double-check the SDP.', { alertUser: true });
         } else {
             logMessage('Failed to apply answer from signaling server', 'peer');
         }

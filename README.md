@@ -3,8 +3,17 @@
 Peer-to-peer message & file sharing Chrome extension for LAN use.  
 Implements WebRTC (Web Real-Time Communication) DataChannel with **manual or automated signaling** (copy/paste SDP or local WebSocket server). No server required for manual mode.
 
+## Project Structure
+- `manifest.json` – Chrome MV3 configuration for the extension.
+- `background.js` – Service worker that opens the side panel when the action icon is clicked.
+- `sidepanel.html` – Main user interface loaded inside Chrome's side panel.
+- `sidepanel.js` – WebRTC signaling, DataChannel messaging, and file transfer logic.
+- `styles.css` – Light/dark theme styling, connection state badges, and layout rules.
+- `server.js` – Optional local WebSocket relay for automated signaling on a LAN.
+- `docs/nat-traversal-overview.md` – A friendly primer on STUN, TURN, and ICE.
+
 ## How to install (developer mode)
-1. Save the project folder (contains `manifest.json`, `sidepanel.html`, `popup.js`, `styles.css`).
+1. Save the project folder (contains `manifest.json`, `sidepanel.html`, `sidepanel.js`, `styles.css`).
 2. In Chrome, go to `chrome://extensions/` → enable **Developer mode** → **Load unpacked** → select the folder.
 3. Click the extension icon to open the side panel on two (or more) machines on your LAN. The panel stays active while it remains visible.
 
@@ -34,6 +43,13 @@ Implements WebRTC (Web Real-Time Communication) DataChannel with **manual or aut
 - A **Cancel Transfer** button shows while you are sending, and a **Cancel Receive** button appears while you are receiving—use these to safely abort stalled transfers.
 - When a file finishes downloading, the receiver gets a link (e.g. “Download example.zip”). Click it to trigger Chrome's download prompt; extensions cannot auto-save files.
 - Only one outgoing transfer per browser runs at a time. You can still exchange uploads simultaneously (each peer sending one file).
+
+## User Interface
+- **Setup / Chat Tabs** – Configure signaling on the Setup tab, then switch to Chat once connected.
+- **Connection Status Badges** – A pill next to the ICE status shows `[OK]` connected, `[...]` connecting, `[ERR]` failed, or `[--]` idle.
+- **Progress Meter** – File transfers display both a progress bar and a percentage label; cancel buttons appear while transfers are active.
+- **Keyboard Shortcuts** – `Ctrl/Cmd + D` disconnects the current session; `Esc` cancels an in-flight file transfer (when the cancel button is visible).
+- **Dark Mode** – Toggle 🌙 in the header to switch themes.
 
 ## How It Works: WebRTC & SDP
 
@@ -103,10 +119,10 @@ By default, this extension is configured for local network (LAN/Wi-Fi) use with 
 -   **ICE (Interactive Connectivity Establishment)** is the process WebRTC uses to find the best path to connect peers. It does this by gathering network addresses (candidates).
 -   With the STUN server, it can gather public IP addresses, allowing connections over the internet in many cases.
 
-For more reliable internet connections, you can add a TURN server to the configuration in `popup.js`:
+For more reliable internet connections, you can add a TURN server to the configuration in `sidepanel.js`:
 
 ```javascript
-// in popup.js
+// in sidepanel.js
 pc = new RTCPeerConnection({
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -122,8 +138,14 @@ pc = new RTCPeerConnection({
 ## Troubleshooting
 - **“Receiving failed: missing metadata. Requested peer to resend.”** — The receiver saw file data before the header (usually after a cancel or network blip). The sender will stop automatically; resend the file once both sides show idle progress.
 - If progress counts race far past the expected file size, reload the extension (`chrome://extensions/` → **Reload**) to ensure both peers have the latest code.
+- **“DataChannel not open yet.”** — Complete the full offer/answer exchange (or connect both peers to the signaling server) before sending messages or files.
+- **File transfer stalls near 100%.** — Hit **Cancel Transfer** on both sides, then resend. Large files on slow links may expose network limits; try again after a pause.
+- **“Failed to connect to signaling server.”** — Confirm the address includes a port (e.g., `192.168.1.10:8080`), that `server.js` is running, and that firewall rules allow WebSocket traffic.
+- Reloading the extension is a quick way to clear any stuck state if peers drift out of sync.
 
-For a deeper dive into NAT behavior, see [`docs/nat-traversal-overview.md`](docs/nat-traversal-overview.md).
+## Learn More
+- 📖 [`docs/nat-traversal-overview.md`](docs/nat-traversal-overview.md) for a gentle primer on NAT traversal, STUN, TURN, and ICE.
+- 🛠️ [`server.js`](server.js) demonstrates a minimal WebSocket relay for automated SDP exchange on a LAN.
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
