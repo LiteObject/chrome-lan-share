@@ -33,6 +33,8 @@ const chatContent = document.getElementById('chatContent');
 
 const CHUNK_SIZE = 16 * 1024; // send files in 16KB chunks to balance speed and reliability
 const BUFFERED_AMOUNT_LIMIT = 1024 * 1024; // pause if DataChannel buffers exceed 1MB
+const BUFFERED_AMOUNT_LOW_THRESHOLD = Math.floor(BUFFERED_AMOUNT_LIMIT / 2);
+const ICE_GATHER_TIMEOUT_MS = 5000;
 
 let pc = null;
 let dc = null;
@@ -42,6 +44,39 @@ let useServer = false;
 let waitingForServerOffer = false;
 let activeSend = null;
 let cancelCurrentTransfer = null;
+
+function normalizeServerAddress(raw) {
+    if (!raw) return null;
+    let input = raw.trim();
+    if (!input) return null;
+
+    if (/^wss?:\/\//i.test(input)) {
+        // already a ws(s) URL
+    } else if (/^https?:\/\//i.test(input)) {
+        input = input.replace(/^http/i, 'ws');
+    } else if (/^\/\//.test(input)) {
+        input = `ws:${input}`;
+    } else {
+        input = `ws://${input}`;
+    }
+
+    try {
+        const url = new URL(input);
+        if (!url.hostname) {
+            return null;
+        }
+        if (!url.port) {
+            // leave port empty if user provided hostname only
+        }
+        if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
+            return null;
+        }
+        return url.toString();
+    } catch (err) {
+        console.error('Invalid WebSocket address', err);
+        return null;
+    }
+}
 
 function setCancelAction(handler, label = 'Cancel Transfer') {
     if (!cancelTransferBtn) {
@@ -86,40 +121,123 @@ function ensureChannelOpen() {
     }
 }
 
+function assertSendState(state) {
+    if (state && (state.cancelRequested || state.peerCancelled)) {
+        const reason = state.cancelReason || (state.peerCancelled ? 'peer cancelled' : 'sender cancelled');
+        throw new Error(reason);
+    }
+}
+
+function waitForNextMicrotask() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function waitForSendWindow(state, channel = dc) {
+    if (!channel || channel.readyState !== 'open' || channel.bufferedAmount <= BUFFERED_AMOUNT_LIMIT) {
+        assertSendState(state);
+        return;
+    }
+
+    await new Promise((resolve, reject) => {
+        let settled = false;
+
+        const settle = (fn) => (value) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            fn(value);
+        };
+
+        const onResolve = settle(resolve);
+        const onReject = settle(reject);
+
+        const onLow = () => {
+            try {
+                assertSendState(state);
+                if (!channel || channel.readyState !== 'open') {
+                    throw new Error('DataChannel is not open');
+                }
+                onResolve();
+            } catch (err) {
+                onReject(err);
+            }
+        };
+
+        const onClose = () => {
+            onReject(new Error('DataChannel is not open'));
+        };
+
+        const checkInterval = setInterval(() => {
+            try {
+                assertSendState(state);
+                if (!channel || channel.readyState !== 'open') {
+                    throw new Error('DataChannel is not open');
+                }
+            } catch (err) {
+                onReject(err);
+                return;
+            }
+            if (channel.bufferedAmount <= BUFFERED_AMOUNT_LIMIT) {
+                onResolve();
+            }
+        }, 50);
+
+        const timeout = setTimeout(() => {
+            try {
+                assertSendState(state);
+                if (!channel || channel.readyState !== 'open') {
+                    throw new Error('DataChannel is not open');
+                }
+                onResolve();
+            } catch (err) {
+                onReject(err);
+            }
+        }, 5000);
+
+        const cleanup = () => {
+            clearInterval(checkInterval);
+            clearTimeout(timeout);
+            try {
+                channel?.removeEventListener('bufferedamountlow', onLow);
+                channel?.removeEventListener('close', onClose);
+            } catch (err) {
+                console.warn('Failed to cleanup bufferedamount listeners', err);
+            }
+        };
+
+        try {
+            channel.addEventListener('bufferedamountlow', onLow, { once: true });
+            channel.addEventListener('close', onClose, { once: true });
+        } catch (err) {
+            console.error('Failed to attach bufferedamount listeners', err);
+        }
+    });
+}
+
 async function sendChunk(chunk, sendState = activeSend) {
     const state = sendState || activeSend;
-    if (state && (state.cancelRequested || state.peerCancelled)) {
-        const reason = state.cancelReason || (state.peerCancelled ? 'peer cancelled' : 'sender cancelled');
-        throw new Error(reason);
-    }
-
+    assertSendState(state);
     ensureChannelOpen();
-
-    if (state && (state.cancelRequested || state.peerCancelled)) {
-        const reason = state.cancelReason || (state.peerCancelled ? 'peer cancelled' : 'sender cancelled');
-        throw new Error(reason);
+    const channel = dc;
+    if (!channel || channel.readyState !== 'open') {
+        throw new Error('DataChannel is not open');
     }
-
-    dc.send(chunk);
-
-    if (dc.bufferedAmount > BUFFERED_AMOUNT_LIMIT) {
-        while (dc.bufferedAmount > BUFFERED_AMOUNT_LIMIT) {
-            await new Promise((resolve) => setTimeout(resolve, 20));
-            ensureChannelOpen();
-            if (state && (state.cancelRequested || state.peerCancelled)) {
-                const reason = state.cancelReason || (state.peerCancelled ? 'peer cancelled' : 'sender cancelled');
-                throw new Error(reason);
-            }
-        }
+    await waitForSendWindow(state, channel);
+    assertSendState(state);
+    ensureChannelOpen();
+    channel.send(chunk);
+    if (channel.bufferedAmount > BUFFERED_AMOUNT_LIMIT) {
+        await waitForSendWindow(state, channel);
     } else {
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await waitForNextMicrotask();
     }
 }
 
 function updateSendProgress(file, sent) {
     const percent = file.size ? (sent / file.size) * 100 : 0;
     fileProgress.value = percent;
-    fileProgressText.textContent = `Sending "${file.name}" (${sent} / ${file.size})`;
+    const prettyPercent = percent ? percent.toFixed(1) : '0.0';
+    fileProgressText.textContent = `Sending "${file.name}" (${sent} / ${file.size}) – ${prettyPercent}%`;
 }
 
 function sendFileSignal(payload) {
@@ -200,35 +318,84 @@ async function sendFileFromStream(file) {
 
 async function sendFileFromArrayBuffer(file) {
     const sendState = activeSend;
-    const buffer = await file.arrayBuffer();
-    const view = new Uint8Array(buffer);
+    const reader = new FileReader();
     let sent = 0;
-    for (let offset = 0; offset < view.byteLength;) {
-        if (sendState && (sendState.cancelRequested || sendState.peerCancelled)) {
-            const reason = sendState.cancelReason || (sendState.peerCancelled ? 'peer cancelled' : 'sender cancelled');
-            throw new Error(reason);
+    const readerWrapper = {
+        cancel: () => {
+            try {
+                reader.abort();
+            } catch (abortErr) {
+                console.warn('Failed to abort FileReader', abortErr);
+            }
         }
-        const end = Math.min(offset + CHUNK_SIZE, view.byteLength);
-        const slice = view.subarray(offset, end);
-        await sendChunk(slice, sendState);
-        sent += slice.byteLength;
-        updateSendProgress(file, sent);
-        offset = end;
+    };
+    if (sendState) {
+        sendState.reader = readerWrapper;
+    }
+
+    try {
+        for (let offset = 0; offset < file.size;) {
+            assertSendState(sendState);
+            const end = Math.min(offset + CHUNK_SIZE, file.size);
+            const chunkBuffer = await readFileSlice(reader, file.slice(offset, end), sendState);
+            assertSendState(sendState);
+            await sendChunk(new Uint8Array(chunkBuffer), sendState);
+            sent += chunkBuffer.byteLength;
+            updateSendProgress(file, sent);
+            offset = end;
+        }
+    } finally {
+        if (sendState && sendState.reader === readerWrapper) {
+            sendState.reader = null;
+        }
     }
 }
 
+function readFileSlice(reader, blob, state) {
+    return new Promise((resolve, reject) => {
+        const cleanup = () => {
+            reader.onload = null;
+            reader.onerror = null;
+            reader.onabort = null;
+        };
+
+        reader.onload = () => {
+            cleanup();
+            resolve(reader.result);
+        };
+
+        const fail = (err) => {
+            cleanup();
+            if (err?.name === 'AbortError') {
+                const reason = state?.cancelReason || (state?.peerCancelled ? 'peer cancelled' : 'sender cancelled');
+                reject(new Error(reason || 'sender cancelled'));
+            } else {
+                reject(err || new Error('Failed to read file chunk'));
+            }
+        };
+
+        reader.onerror = () => fail(reader.error);
+        reader.onabort = () => fail(reader.error || new DOMException('Aborted', 'AbortError'));
+
+        try {
+            reader.readAsArrayBuffer(blob);
+        } catch (err) {
+            fail(err);
+        }
+    });
+}
+
 function resetUI() {
-    iceStatus.textContent = 'ICE: —';
+    updateIceStatus();
     updateConnStatus();
     copyLocalBtn.disabled = true;
     setRemoteBtn.disabled = true;
-    createOfferBtn.disabled = useServer && !ws;
-    createAnswerBtn.disabled = useServer && !ws;
     localSDPTextarea.value = '';
     remoteSDPTextarea.value = '';
     clearFileProgress();
     waitingForServerOffer = false;
     setCancelAction(null);
+    updateSignalingUI();
 }
 
 resetUI();
@@ -255,33 +422,17 @@ chatTab.addEventListener('click', () => {
 useServerCheckbox.addEventListener('change', () => {
     useServer = useServerCheckbox.checked;
     waitingForServerOffer = false;
-    connectServerBtn.disabled = !useServer;
     if (!useServer && ws) {
         ws.close();
         ws = null;
     }
-    // Toggle UI for manual vs server
-    if (useServer) {
-        localSDPTextarea.style.display = 'none';
-        remoteSDPTextarea.style.display = 'none';
-        copyLocalBtn.style.display = 'none';
-        setRemoteBtn.style.display = 'none';
-        createAnswerBtn.textContent = 'Wait for Offer';
-        // disable offer/answer until we have a WS connection
-        createOfferBtn.disabled = !ws;
-        createAnswerBtn.disabled = !ws;
-    } else {
-        localSDPTextarea.style.display = 'block';
-        remoteSDPTextarea.style.display = 'block';
-        copyLocalBtn.style.display = 'inline-block';
-        setRemoteBtn.style.display = 'inline-block';
-        createAnswerBtn.textContent = 'Set Remote / Create Answer';
-        createOfferBtn.disabled = false;
-        createAnswerBtn.disabled = false;
-    }
+    updateSignalingUI();
 });
 
 disconnectBtn.addEventListener('click', () => {
+    if (activeSend) {
+        handleFileSendFailure(activeSend.id, activeSend.name, 'connection reset', activeSend);
+    }
     if (dc) {
         try { dc.close(); } catch (err) { console.error(err); }
         dc = null;
@@ -291,38 +442,70 @@ disconnectBtn.addEventListener('click', () => {
         pc = null;
     }
     isOfferer = false;
+    waitingForServerOffer = false;
     resetUI();
     logMessage('Connection reset by user', 'peer');
 });
 
 connectServerBtn.addEventListener('click', () => {
-    if (ws) ws.close();
-    const addr = serverIPInput.value.trim();
-    if (!addr || !addr.includes(':')) {
-        alert('Please enter a valid server address (e.g., localhost:8080 or 192.168.1.100:8080)');
+    if (!useServer) {
+        alert('Enable "Use Signaling Server" before connecting.');
         return;
     }
-    const serverAddr = 'ws://' + addr;
-    ws = new WebSocket(serverAddr);
-    ws.onopen = () => {
-        logMessage('Connected to signaling server at ' + serverAddr, 'peer');
-        connectServerBtn.textContent = 'Connected';
-        if (useServer) {
-            createOfferBtn.disabled = false;
-            createAnswerBtn.disabled = false;
-        }
-    };
-    ws.onmessage = async (event) => {
+
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        ws.close();
+        return;
+    }
+
+    const normalized = normalizeServerAddress(serverIPInput.value);
+    if (!normalized) {
+        alert('Please enter a valid WebSocket address (e.g., ws://localhost:8080).');
+        return;
+    }
+
+    let socket;
+    try {
+        socket = new WebSocket(normalized);
+    } catch (err) {
+        console.error('Failed to initiate WebSocket', err);
+        alert('Invalid WebSocket URL. Please verify the address and try again.');
+        return;
+    }
+
+    ws = socket;
+    updateSignalingUI();
+
+    socket.addEventListener('open', () => {
+        if (ws !== socket) return;
+        logMessage(`Connected to signaling server at ${normalized}`, 'peer');
+        updateSignalingUI();
+    });
+
+    socket.addEventListener('message', async (event) => {
+        if (ws !== socket) return;
         let payload = event.data;
         if (payload instanceof Blob) {
             payload = await payload.text();
-        }
-        if (payload instanceof ArrayBuffer) {
+        } else if (payload instanceof ArrayBuffer) {
             payload = new TextDecoder().decode(payload);
         }
 
-        const data = typeof payload === 'string' ? JSON.parse(payload) : payload;
-        if (data.type === 'offer') {
+        let data;
+        try {
+            data = typeof payload === 'string' ? JSON.parse(payload) : payload;
+        } catch (err) {
+            console.error('Invalid signaling payload', err);
+            logMessage('Received malformed message from signaling server (ignored).', 'peer');
+            return;
+        }
+
+        if (!data || typeof data.type !== 'string') {
+            logMessage('Received unknown signaling payload format.', 'peer');
+            return;
+        }
+
+        if (data.type === 'offer' && data.sdp) {
             remoteSDPTextarea.value = JSON.stringify(data.sdp);
             if (!isOfferer) {
                 try {
@@ -331,7 +514,7 @@ connectServerBtn.addEventListener('click', () => {
                     console.error('Failed to handle offer from server', err);
                 }
             }
-        } else if (data.type === 'answer') {
+        } else if (data.type === 'answer' && data.sdp) {
             remoteSDPTextarea.value = JSON.stringify(data.sdp);
             if (isOfferer) {
                 try {
@@ -340,22 +523,26 @@ connectServerBtn.addEventListener('click', () => {
                     console.error('Failed to apply answer from server', err);
                 }
             }
+        } else {
+            logMessage(`Unhandled signaling message type: ${data.type}`, 'peer');
         }
-    };
-    ws.onclose = () => {
+    });
+
+    socket.addEventListener('close', () => {
+        if (ws === socket) {
+            ws = null;
+            waitingForServerOffer = false;
+            updateSignalingUI();
+        }
         logMessage('Disconnected from signaling server', 'peer');
-        connectServerBtn.textContent = 'Connect to Server';
-        ws = null;
-        if (useServer) {
-            createOfferBtn.disabled = true;
-            createAnswerBtn.disabled = true;
+    });
+
+    socket.addEventListener('error', (error) => {
+        console.error('Signaling server error', error);
+        if (ws === socket) {
+            logMessage('Failed to connect to signaling server.', 'peer');
         }
-        resetUI();
-    };
-    ws.onerror = (error) => {
-        logMessage('Failed to connect to signaling server at ' + serverAddr, 'peer');
-        console.error(error);
-    };
+    });
 });
 
 function logMessage(text, who = 'peer') {
@@ -367,52 +554,109 @@ function logMessage(text, who = 'peer') {
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }
 
-function waitForIceGatheringComplete(pc) {
+function waitForIceGatheringComplete(peer, timeoutMs = ICE_GATHER_TIMEOUT_MS) {
     return new Promise((resolve) => {
-        if (pc.iceGatheringState === 'complete') {
-            resolve();
-        } else {
-            function checkState() {
-                if (pc.iceGatheringState === 'complete') {
-                    pc.removeEventListener('icegatheringstatechange', checkState);
-                    resolve();
-                }
-            }
-            pc.addEventListener('icegatheringstatechange', checkState);
+        if (peer.iceGatheringState === 'complete') {
+            resolve(true);
+            return;
         }
+
+        let resolved = false;
+
+        const finalize = (complete) => {
+            if (resolved) return;
+            resolved = true;
+            peer.removeEventListener('icegatheringstatechange', onChange);
+            clearTimeout(timeout);
+            resolve(complete);
+        };
+
+        const onChange = () => {
+            if (peer.iceGatheringState === 'complete') {
+                finalize(true);
+            } else {
+                updateIceStatus();
+            }
+        };
+
+        const timeout = setTimeout(() => {
+            finalize(false);
+        }, timeoutMs);
+
+        peer.addEventListener('icegatheringstatechange', onChange);
     });
 }
 
 function updateConnStatus() {
-    if (!pc) { connStatus.textContent = 'Conn: —'; return; }
-    connStatus.textContent = `Conn: ${pc.connectionState || '—'}`;
+    const pcState = pc ? pc.connectionState || '—' : '—';
+    const dcState = dc ? dc.readyState : '—';
+    connStatus.textContent = `Conn: ${pcState} | DC: ${dcState}`;
+}
+
+function updateIceStatus(extra = '') {
+    if (!pc) {
+        iceStatus.textContent = 'ICE: —';
+        return;
+    }
+    const suffix = extra ? ` ${extra}` : '';
+    iceStatus.textContent = `ICE: ${pc.iceGatheringState}${suffix}`;
+}
+
+function updateSignalingUI() {
+    const serverReady = useServer && ws && ws.readyState === WebSocket.OPEN;
+    const serverConnecting = useServer && ws && ws.readyState === WebSocket.CONNECTING;
+
+    if (useServer) {
+        localSDPTextarea.style.display = 'none';
+        remoteSDPTextarea.style.display = 'none';
+        copyLocalBtn.style.display = 'none';
+        setRemoteBtn.style.display = 'none';
+        createAnswerBtn.textContent = 'Wait for Offer';
+        createOfferBtn.disabled = !serverReady;
+        createAnswerBtn.disabled = !serverReady;
+        connectServerBtn.disabled = false;
+        connectServerBtn.textContent = serverReady ? 'Disconnect' : (serverConnecting ? 'Connecting…' : 'Connect to Server');
+    } else {
+        localSDPTextarea.style.display = 'block';
+        remoteSDPTextarea.style.display = 'block';
+        copyLocalBtn.style.display = 'inline-block';
+        setRemoteBtn.style.display = 'inline-block';
+        createAnswerBtn.textContent = 'Set Remote / Create Answer';
+        createOfferBtn.disabled = false;
+        createAnswerBtn.disabled = false;
+        connectServerBtn.disabled = true;
+        connectServerBtn.textContent = 'Connect to Server';
+    }
 }
 
 // Setup a new RTCPeerConnection and optionally create DataChannel
 function setupPeerConnection({ createDataChannel = false } = {}) {
+    dc = null;
     pc = new RTCPeerConnection({
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' }
         ]
     });
 
-    pc.addEventListener('iceconnectionstatechange', () => {
+    const handleIceConnection = () => {
         updateConnStatus();
-    });
+        if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+            logMessage('ICE connection lost', 'peer');
+        }
+    };
 
     pc.addEventListener('connectionstatechange', () => {
         updateConnStatus();
     });
 
-    pc.addEventListener('icecandidate', (evt) => {
-        // we wait for gathering complete and then expose SDP, so nothing here.
-        iceStatus.textContent = `ICE: ${pc.iceGatheringState}`;
+    pc.addEventListener('iceconnectionstatechange', handleIceConnection);
+
+    pc.addEventListener('icecandidate', () => {
+        updateIceStatus();
     });
 
-    pc.addEventListener('iceconnectionstatechange', () => {
-        if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
-            logMessage('ICE connection lost', 'peer');
-        }
+    pc.addEventListener('icegatheringstatechange', () => {
+        updateIceStatus();
     });
 
     if (createDataChannel) {
@@ -426,12 +670,15 @@ function setupPeerConnection({ createDataChannel = false } = {}) {
         });
     }
 
+    updateConnStatus();
+    updateIceStatus();
+
     return pc;
 }
 
 function setupDataChannel(channel) {
     channel.binaryType = 'arraybuffer';
-    channel.bufferedAmountLowThreshold = 512 * 1024;
+    channel.bufferedAmountLowThreshold = BUFFERED_AMOUNT_LOW_THRESHOLD;
 
     let incomingFile = null; // {id, name, size, received, buffers: []}
     let missingMetadataNotified = false;
@@ -457,11 +704,14 @@ function setupDataChannel(channel) {
     channel.addEventListener('close', () => {
         logMessage('DataChannel closed', 'peer');
         updateConnStatus();
+        if (activeSend) {
+            handleFileSendFailure(activeSend.id, activeSend.name, 'channel closed', activeSend);
+        }
         resetUI();
         clearReceiveState('Transfer cancelled.', { allowOrphanChunks: true });
     });
 
-    channel.addEventListener('message', (evt) => {
+    channel.addEventListener('message', async (evt) => {
         if (typeof evt.data === 'string') {
             try {
                 const obj = JSON.parse(evt.data);
@@ -477,7 +727,7 @@ function setupDataChannel(channel) {
                     ignoreOrphanBinary = false;
                     fileProgress.value = 0;
                     fileProgress.max = 100;
-                    fileProgressText.textContent = `Receiving "${incomingFile.name}" (0 / ${incomingFile.size})`;
+                    fileProgressText.textContent = `Receiving "${incomingFile.name}" (0 / ${incomingFile.size}) – 0.0%`;
                     setCancelAction(() => {
                         if (!incomingFile) return;
                         const name = incomingFile.name;
@@ -536,7 +786,21 @@ function setupDataChannel(channel) {
             return;
         }
 
+        let binaryChunk = null;
         if (evt.data instanceof ArrayBuffer) {
+            binaryChunk = evt.data;
+        } else if (evt.data instanceof Blob) {
+            try {
+                binaryChunk = await evt.data.arrayBuffer();
+            } catch (blobErr) {
+                console.error('Failed to read Blob chunk', blobErr);
+                notifyPeerFileError(incomingFile?.id ?? null, incomingFile?.name ?? null, 'failed to read blob chunk');
+                clearReceiveState('Failed to read incoming file chunk.', { allowOrphanChunks: true });
+                return;
+            }
+        }
+
+        if (binaryChunk instanceof ArrayBuffer) {
             if (!incomingFile) {
                 if (ignoreOrphanBinary) {
                     return;
@@ -550,11 +814,12 @@ function setupDataChannel(channel) {
                 return;
             }
 
-            incomingFile.buffers.push(evt.data);
-            incomingFile.received += evt.data.byteLength;
-            const percent = (incomingFile.received / incomingFile.size) * 100;
+            incomingFile.buffers.push(binaryChunk);
+            incomingFile.received += binaryChunk.byteLength;
+            const percent = incomingFile.size ? (incomingFile.received / incomingFile.size) * 100 : 0;
+            const prettyPercent = percent ? percent.toFixed(1) : '0.0';
             fileProgress.value = percent;
-            fileProgressText.textContent = `Receiving "${incomingFile.name}" (${incomingFile.received} / ${incomingFile.size})`;
+            fileProgressText.textContent = `Receiving "${incomingFile.name}" (${incomingFile.received} / ${incomingFile.size}) – ${prettyPercent}%`;
 
             if (incomingFile.received >= incomingFile.size) {
                 const blob = new Blob(incomingFile.buffers);
@@ -590,14 +855,17 @@ createOfferBtn.addEventListener('click', async () => {
     iceStatus.textContent = `ICE: gathering...`;
 
     // Wait until ICE gathering completes so we can share a complete SDP (no candidate exchange)
-    await waitForIceGatheringComplete(pc);
+    const iceComplete = await waitForIceGatheringComplete(pc);
 
     localSDPTextarea.value = JSON.stringify(pc.localDescription);
     copyLocalBtn.disabled = false;
     setRemoteBtn.disabled = false;
     createAnswerBtn.disabled = true;
 
-    iceStatus.textContent = `ICE: ${pc.iceGatheringState}`;
+    updateIceStatus(iceComplete ? '' : '(timeout)');
+    if (!iceComplete) {
+        logMessage('ICE gathering timed out; using partial candidate set.', 'peer');
+    }
     updateConnStatus();
 
     if (ws) {
@@ -719,7 +987,7 @@ fileInput.addEventListener('change', async (e) => {
 
     fileProgress.value = 0;
     fileProgress.max = 100;
-    fileProgressText.textContent = `Sending "${file.name}" (0 / ${file.size})`;
+    fileProgressText.textContent = `Sending "${file.name}" (0 / ${file.size}) – 0.0%`;
 
     try {
         if (file.stream) {
@@ -799,12 +1067,15 @@ async function respondToOffer(remoteSource, origin = 'manual') {
 
     iceStatus.textContent = `ICE: gathering...`;
 
-    await waitForIceGatheringComplete(pc);
+    const iceComplete = await waitForIceGatheringComplete(pc);
 
     localSDPTextarea.value = JSON.stringify(pc.localDescription);
     copyLocalBtn.disabled = false;
     updateConnStatus();
-    iceStatus.textContent = `ICE: ${pc.iceGatheringState}`;
+    updateIceStatus(iceComplete ? '' : '(timeout)');
+    if (!iceComplete) {
+        logMessage('ICE gathering timed out while creating answer; using partial candidate set.', 'peer');
+    }
 
     if (useServer && ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'answer', sdp: pc.localDescription }));

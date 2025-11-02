@@ -4,7 +4,7 @@ Peer-to-peer message & file sharing Chrome extension for LAN use.
 Implements WebRTC (Web Real-Time Communication) DataChannel with **manual or automated signaling** (copy/paste SDP or local WebSocket server). No server required for manual mode.
 
 ## How to install (developer mode)
-1. Save the project folder (contains `manifest.json`, `popup.html`, `popup.js`, `styles.css`).
+1. Save the project folder (contains `manifest.json`, `sidepanel.html`, `popup.js`, `styles.css`).
 2. In Chrome, go to `chrome://extensions/` → enable **Developer mode** → **Load unpacked** → select the folder.
 3. Click the extension icon to open the side panel on two (or more) machines on your LAN. The panel stays active while it remains visible.
 
@@ -122,6 +122,8 @@ pc = new RTCPeerConnection({
 ## Troubleshooting
 - **“Receiving failed: missing metadata. Requested peer to resend.”** — The receiver saw file data before the header (usually after a cancel or network blip). The sender will stop automatically; resend the file once both sides show idle progress.
 - If progress counts race far past the expected file size, reload the extension (`chrome://extensions/` → **Reload**) to ensure both peers have the latest code.
+
+For a deeper dive into NAT behavior, see [`docs/nat-traversal-overview.md`](docs/nat-traversal-overview.md).
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

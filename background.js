@@ -5,8 +5,13 @@ const openSidePanel = (tab) => {
     }
 
     if (!chrome.sidePanel) {
-        chrome.action.setPopup({ popup: 'popup.html' });
-        console.warn('sidePanel API unavailable; switched back to popup.');
+        const url = chrome.runtime.getURL('sidepanel.html');
+        chrome.tabs.create({ url }, () => {
+            if (chrome.runtime.lastError) {
+                console.error('Failed to open side panel fallback tab', chrome.runtime.lastError);
+            }
+        });
+        console.warn('sidePanel API unavailable; opened sidepanel.html in a new tab instead.');
         return;
     }
 
@@ -17,7 +22,7 @@ const openSidePanel = (tab) => {
 
 chrome.runtime.onInstalled.addListener(() => {
     if (!chrome.sidePanel) {
-        chrome.action.setPopup({ popup: 'popup.html' });
+        console.warn('sidePanel API unavailable during install; users must open sidepanel.html manually.');
         return;
     }
 
