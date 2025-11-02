@@ -35,8 +35,37 @@ Implements WebRTC (Web Real-Time Communication) DataChannel with **manual or aut
 
 ### Side Panel Workflow
 - The extension opens inside Chrome's side panel (Chrome 116+) so the UI persists while you browse other tabs.
-- If the side panel is closed, the WebRTC connection tears down just like closing the popup would.
+- If the side panel is closed, the WebRTC connection tears down just like closing the panel.
 - You can toggle the panel from the extension icon or via Chrome's side panel shortcut (`Ctrl+Shift+.` / `Cmd+Shift+.`) and selecting **Chrome LAN Share** from the drop-down.
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Chrome MV3 Extension                                         │
+├─────────────────────────────────────────────────────────────┤
+│  background.js  ──▶  Opens side panel on action icon         │
+│  sidepanel.html ──▶  UI scaffolding                         │
+│  sidepanel.js   ──▶  WebRTC signaling + DataChannel logic    │
+│  styles.css     ──▶  Light/dark theming + layout             │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+               Manual copy/paste  │  Optional WebSocket relay
+                            ▼
+            ┌──────────────────────────────┐
+            │  Signaling path (choose one) │
+            ├──────────────────────────────┤
+            │  Manual: share SDP text      │
+            │  Automated: server.js relay  │
+            └──────────────────────────────┘
+                            │
+                            ▼
+            ┌──────────────────────────────┐
+            │  WebRTC Peer Connection      │
+            │  (DTLS + DataChannel)        │
+            └──────────────────────────────┘
+```
 
 ### File Transfers
 - Click **Send File** to pick a file; progress appears directly beneath the button.
@@ -119,10 +148,10 @@ By default, this extension is configured for local network (LAN/Wi-Fi) use with 
 -   **ICE (Interactive Connectivity Establishment)** is the process WebRTC uses to find the best path to connect peers. It does this by gathering network addresses (candidates).
 -   With the STUN server, it can gather public IP addresses, allowing connections over the internet in many cases.
 
-For more reliable internet connections, you can add a TURN server to the configuration in `sidepanel.js`:
+For more reliable internet connections, you can add a TURN server to the configuration in `sidepanel.js` (inside `setupPeerConnection`, near the top of the file):
 
 ```javascript
-// in sidepanel.js
+// sidepanel.js – inside setupPeerConnection()
 pc = new RTCPeerConnection({
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -132,8 +161,24 @@ pc = new RTCPeerConnection({
 ```
 
 ## Security
-- Only exchange SDP with trusted devices.
-- This demo does not include authentication — for production, add pairing tokens or passcodes and encryption.
+
+Chrome LAN Share is intended for **trusted local networks**. The current build lacks authentication and assumes peers are friendly. Keep the following in mind:
+
+### What ships today
+- ✅ WebRTC encrypts traffic end-to-end with DTLS once peers connect.
+- ✅ Manual mode keeps signaling data completely local (no servers involved).
+- ❌ Automated signaling (`server.js`) does **not** require authentication.
+- ❌ Any device on the signaling server can broadcast offers/answers.
+- ❌ SDP payloads are accepted after basic JSON parsing only.
+
+### Suggested hardening steps before wider deployment
+1. **Authenticate signaling sessions** – require a shared PIN, token, or one-click approval before accepting offers.
+2. **Serve signaling over TLS** – run the WebSocket relay as `wss://` with a trusted certificate.
+3. **Validate SDP payloads** – inspect type/size before calling `setRemoteDescription` and reject unexpected fields.
+4. **Isolate rooms** – include connection codes or room IDs so neighbors on the same LAN cannot collide.
+5. **Rate-limit file metadata** – defend the channel against rapid-fire metadata spam or oversized payloads.
+
+If you plan to expose the signaling server to the wider internet, implement the above safeguards first.
 
 ## Troubleshooting
 - **“Receiving failed: missing metadata. Requested peer to resend.”** — The receiver saw file data before the header (usually after a cancel or network blip). The sender will stop automatically; resend the file once both sides show idle progress.
